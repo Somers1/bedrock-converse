@@ -4,17 +4,16 @@ A Python SDK for AWS Bedrock that makes prompts readable, tools natural, and age
 
 ## Why?
 
-I built this because the existing options frustrated me:
+AWS Bedrock's Converse API is a single unified interface across every model — Claude, Llama, Nova, Mistral, Cohere, Kimi. Same prompt format, same tool calling, same response structure. Write once, swap models with a string. Your data stays in your AWS account.
 
-1. **Prompt formatting sucks.** Every SDK makes you build nested dicts or wrestle with message arrays. I wanted to build prompts the way I think about them — add text, add an image, add a document, send it.
+This SDK is a lightweight wrapper built specifically around the Converse API. If that's all you need, it's simpler and more direct than full frameworks like LangChain (which is great for broader orchestration, but carries a lot of weight if you just want to talk to Bedrock).
 
-2. **Tool definitions are painful.** Writing JSON schemas by hand or decorating functions with 15 lines of metadata is insane. I wanted `@tool` on a function and done — types inferred, schema generated.
+The goals were straightforward:
 
-3. **LangChain wasn't keeping up.** When new models dropped on Bedrock, I'd wait weeks for library updates. I needed something I controlled that worked directly with the Bedrock APIs.
-
-4. **Security matters.** AWS Bedrock means my data stays in my AWS account. No third-party API proxies, no data leaving my infrastructure.
-
-5. **The Converse API is the future.** AWS built one unified API that works across every model on Bedrock — Claude, Llama, Nova, Mistral, Cohere, Kimi. Same prompt format, same tool calling interface, same response structure. Write once, swap models with a string. This SDK is built specifically to support the Converse API as a first-class citizen, not as an afterthought bolted onto an OpenAI-shaped interface.
+1. **Readable prompts.** Build messages by chaining `.add_text()`, `.add_image()`, `.add_document()` — not nested dicts.
+2. **Natural tool definitions.** Put `@tool` on a function. Types are inferred, schema is generated. Done.
+3. **Stay current.** When new models land on Bedrock, they work immediately through the Converse API — no waiting for library updates.
+4. **Keep it small.** Minimal dependencies, no framework lock-in.
 
 ## Install
 
