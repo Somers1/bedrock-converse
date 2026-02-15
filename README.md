@@ -12,7 +12,9 @@ I built this because the existing options frustrated me:
 
 3. **LangChain wasn't keeping up.** When new models dropped on Bedrock, I'd wait weeks for library updates. I needed something I controlled that worked directly with the Bedrock APIs.
 
-4. **Security matters.** AWS Bedrock means my data stays in my AWS account. No third-party API proxies, no data leaving my infrastructure. The Converse API is universal across models — swap Claude for Llama for Nova without changing code.
+4. **Security matters.** AWS Bedrock means my data stays in my AWS account. No third-party API proxies, no data leaving my infrastructure.
+
+5. **The Converse API is the future.** AWS built one unified API that works across every model on Bedrock — Claude, Llama, Nova, Mistral, Cohere, Kimi. Same prompt format, same tool calling interface, same response structure. Write once, swap models with a string. This SDK is built specifically to support the Converse API as a first-class citizen, not as an afterthought bolted onto an OpenAI-shaped interface.
 
 ## Install
 
