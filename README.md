@@ -1,4 +1,4 @@
-# Bedrock SDK
+# Bedrock Converse
 
 A Python SDK for AWS Bedrock that makes prompts readable, tools natural, and agents simple.
 
@@ -18,9 +18,9 @@ The goals were straightforward:
 ## Install
 
 ```bash
-pip install git+https://github.com/Somers1/bedrock-sdk.git
+pip install bedrock-converse
 # With image resizing support:
-pip install "bedrock-sdk[image]"
+pip install "bedrock-converse[image]"
 ```
 
 ---
