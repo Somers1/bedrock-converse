@@ -9,4 +9,4 @@ from .converse import (
 from .tools import tool, Tools
 from .embedding import BedrockEmbedding, MultimodalInput, EmbeddingResponse, TextChunker, S3VectorsStore, VectorItem, VectorResponse
 from .bases import BaseCallbackHandler
-from .callbacks import PrintCallback, EMFMetricsCallback
+from .callbacks import PrintCallback
