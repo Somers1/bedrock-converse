@@ -23,7 +23,7 @@ class EMFMetricsCallback(BaseCallbackHandler):
             "_aws": {
                 "Timestamp": int(time.time() * 1000),
                 "CloudWatchMetrics": [{
-                    "Namespace": 'Talos/TokenUsage',
+                    "Namespace": os.getenv('EMF_NAMESPACE', 'BedrockConverse/TokenUsage'),
                     "Dimensions": [["Service", "Function", "DocumentClass"]],
                     "Metrics": [
                         {"Name": "PromptTokens", "Unit": "Count"},
@@ -36,7 +36,7 @@ class EMFMetricsCallback(BaseCallbackHandler):
                     ]
                 }]
             },
-            "Service": 'talos',
+            "Service": os.getenv('EMF_SERVICE', 'bedrock-converse'),
             "Function": os.getenv('AWS_LAMBDA_FUNCTION_NAME', 'Unknown Lambda Function'),
             "PromptTokens": response.usage.input_tokens,
             "CompletionTokens": response.usage.output_tokens,
@@ -45,6 +45,6 @@ class EMFMetricsCallback(BaseCallbackHandler):
             "CompletionCost": response.cost.output_cost,
             "TotalCost": response.cost.total_cost,
             "ModelId": response.model_id,
-            "DocumentClass": os.environ.get('TalosDocumentClass', 'N/A'),
+            "DocumentClass": os.environ.get('BEDROCK_DOCUMENT_CLASS', 'N/A'),
             "Duration": response.metrics.latency_ms
         }))
