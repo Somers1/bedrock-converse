@@ -6,7 +6,7 @@ from .converse import (
     ConverseToolConfig, AdditionalModelRequestFields, ConversePerformanceConfig,
     Finish, structured_model_factory
 )
-from .tools import tool, Tools
+from .tools import tool, Tools, exit_tool
 from .embedding import BedrockEmbedding, MultimodalInput, EmbeddingResponse, TextChunker, S3VectorsStore, VectorItem, VectorResponse
 from .bases import BaseCallbackHandler
 from .callbacks import PrintCallback

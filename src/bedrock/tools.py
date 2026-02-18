@@ -135,10 +135,18 @@ def validate_tool_schema(tool_spec: dict) -> bool:
         return False
 
 
+def exit_tool(method):
+    """Mark a tool method as the exit tool. When bound via bind_tools, the agent
+    will automatically use this as the exit condition."""
+    method._is_exit_tool = True
+    return method
+
+
 class Tools:
     def __init_subclass__(cls, **kwargs):
         super().__init_subclass__(**kwargs)
         cls._tool_methods = {}
+        cls._exit_tool_name = None
         cls._discover_tools()
 
     @classmethod
@@ -152,6 +160,8 @@ class Tools:
                 'spec': tool_spec,
                 'method': method
             }
+            if getattr(method, '_is_exit_tool', False):
+                cls._exit_tool_name = f"{cls.__name__}_{name}"
 
     @classmethod
     def _generate_tool_spec(cls, method_name: str, method: Callable) -> dict:
