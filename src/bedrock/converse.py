@@ -1345,6 +1345,7 @@ class ConverseAgent(Converse):
         if isinstance(tool, str):
             for ct in (self.tool_config.tools if self.tool_config else []):
                 if ct.tool_spec.name.endswith(f'_{tool}') or ct.tool_spec.name == tool:
+                    logger.info(f'Found and bound tool {ct.tool_spec.name} as agent exit tool.')
                     self.exit_tool = ct
                     return self
             raise ValueError(f"No bound tool matching '{tool}' found in current tools")
