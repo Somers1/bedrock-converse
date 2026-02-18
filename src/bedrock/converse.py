@@ -1335,9 +1335,17 @@ class ConverseAgent(Converse):
     structured_output: Optional[BaseModel] = None
     debug: bool = False
     _list_wrapped: bool = False  # Track if we wrapped a List type
+    _on_text: Optional[callable] = None
 
     def __post_init__(self):
-        super()._TO_DICT_EXCLUSIONS.extend(['max_iterations', 'exit_tool', 'structured_output', 'debug', '_list_wrapped'])
+        super()._TO_DICT_EXCLUSIONS.extend(['max_iterations', 'exit_tool', 'structured_output', 'debug', '_list_wrapped', '_on_text'])
+
+    def on_text(self, hook: callable):
+        """Register a hook called when the agent responds with text instead of tools.
+        The hook receives the text string. If it returns a value, that becomes the
+        agent's return value and the loop ends. If it returns None, the loop continues."""
+        self._on_text = hook
+        return self
 
     def bind_exit_tool(self, tool):
         """Bind an exit tool. If tool is a string, looks up an already-bound tool by name suffix
@@ -1431,6 +1439,12 @@ class ConverseAgent(Converse):
                             status="error"
                         )
                     tool_results.append(tool_result)
+            if not tool_results and self._on_text:
+                text_parts = [c.text for c in response.output.message.content if c.text]
+                if text_parts:
+                    result = self._on_text('\n'.join(text_parts))
+                    if result is not None:
+                        return result
             if tool_results:
                 tool_message = Message(role="user")
                 for result in tool_results:
