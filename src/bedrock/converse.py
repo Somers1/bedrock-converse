@@ -1006,14 +1006,7 @@ class Converse(ToDictMixin, FromDictMixin):
 
     def bind_tools(self, tools: list | Tools):
         if isinstance(tools, Tools):
-            converse_tools = self.add_tool(tools)
-            # Auto-detect @exit_tool decorated methods
-            exit_tool_name = getattr(tools.__class__, '_exit_tool_name', None)
-            if exit_tool_name and converse_tools:
-                for ct in converse_tools:
-                    if ct.tool_spec.name == exit_tool_name:
-                        self.exit_tool = ct
-                        break
+            self.add_tool(tools)
             return self
         self.tool_config = ConverseToolConfig()
         for tool in tools:
@@ -1347,6 +1340,14 @@ class ConverseAgent(Converse):
         super()._TO_DICT_EXCLUSIONS.extend(['max_iterations', 'exit_tool', 'structured_output', 'debug', '_list_wrapped'])
 
     def bind_exit_tool(self, tool):
+        """Bind an exit tool. If tool is a string, looks up an already-bound tool by name suffix
+        (e.g. 'send_message' matches 'ChatTools_send_message'). Otherwise adds and binds it."""
+        if isinstance(tool, str):
+            for ct in (self.tool_config.tools if self.tool_config else []):
+                if ct.tool_spec.name.endswith(f'_{tool}') or ct.tool_spec.name == tool:
+                    self.exit_tool = ct
+                    return self
+            raise ValueError(f"No bound tool matching '{tool}' found in current tools")
         self.exit_tool = self.add_tool(tool)
         return self
 
