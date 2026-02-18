@@ -782,6 +782,7 @@ class Converse(ToDictMixin, FromDictMixin):
 
     def add_callback(self, callback):
         self.callbacks.append(callback)
+        return self
 
     # OpenAI-compatible payload conversion methods (from talos)
     def _to_openai_payload(self, messages):
@@ -1053,14 +1054,17 @@ class Converse(ToDictMixin, FromDictMixin):
 
     def add_system(self, system):
         self.system.append(SystemContent(text=system))
+        return self
 
     def add_system_cache_point(self):
         self.system.append(SystemContent(cache_point=CachePoint()))
+        return self
 
     def set_tool_choice(self, tool_name):
         if inspect.isclass(tool_name) and issubclass(tool_name, BaseModel):
             tool_name = tool_name.__name__
         self.tool_config.tool_choice = ToolChoice(tool=ToolChoiceTool(name=tool_name))
+        return self
 
     @property
     def thinking_enabled(self) -> bool:
