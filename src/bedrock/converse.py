@@ -503,7 +503,10 @@ class Message(ToDictMixin, FromDictMixin):
     def add_current_time(self, tz=ZoneInfo('UTC')):
         if isinstance(tz, str):
             tz = ZoneInfo(tz)
-        self.add_text(f'<current_time>{datetime.now().astimezone(tz).isoformat()}</current_time>')
+        now = datetime.now().astimezone(tz)
+        iso = now.isoformat()
+        human = now.strftime('%A %d %B %Y at %I:%M %p')
+        self.add_text(f'<current_time>{iso} ({human})</current_time>')
 
     def add_text(self, text, tag=None):
         if text is not None and text.strip('\n').strip():
