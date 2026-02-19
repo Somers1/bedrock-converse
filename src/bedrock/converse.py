@@ -1421,8 +1421,10 @@ class ConverseAgent(Converse):
                         if tool_name == self.exit_tool.tool_spec.name:
                             if self.structured_output:
                                 result = self.structured_output.model_validate(tool_input)
-                            else:
+                            elif tool_name == 'Finish':
                                 result = Finish.model_validate(tool_input).final_response
+                            else:
+                                result = self.tool_registry.execute(tool_name, tool_input)
                             exit_tool_results.append(result)
                         else:
                             result = self.tool_registry.execute(tool_name, tool_input)
