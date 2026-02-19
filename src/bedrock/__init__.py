@@ -10,3 +10,4 @@ from .tools import tool, Tools, exit_tool
 from .embedding import BedrockEmbedding, MultimodalInput, EmbeddingResponse, TextChunker, S3VectorsStore, VectorItem, VectorResponse
 from .bases import BaseCallbackHandler
 from .callbacks import PrintCallback
+from .mantle import Mantle, MantleAgent, StructuredMantle
