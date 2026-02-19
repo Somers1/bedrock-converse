@@ -728,10 +728,8 @@ class Converse(ToDictMixin, FromDictMixin):
     aws_secret_access_key: Optional[str] = None
     _async_client: boto3.client = None
     tool_registry: ToolRegistry = field(default_factory=ToolRegistry)
-    use_invoke_model: bool = False
-
     _TO_DICT_EXCLUSIONS = ['region_name', '_client', 'callbacks', 'aws_access_key_id', 'aws_secret_access_key',
-                           '_async_client', 'tool_registry', 'use_invoke_model']
+                           '_async_client', 'tool_registry']
     CACHE_SUPPORTED_MODELS = ['claude-3-5-haiku', 'claude-3-7-sonnet', 'amazon.nova', 'claude-sonnet-4',
                               'claude-opus-4', 'claude-haiku-4', 'claude-haiku-4-5']
 
@@ -787,160 +785,19 @@ class Converse(ToDictMixin, FromDictMixin):
         self.callbacks.append(callback)
         return self
 
-    # OpenAI-compatible payload conversion methods (from talos)
-    def _to_openai_payload(self, messages):
-        msgs = []
-        if self.system:
-            system_text = '\n'.join(s.text for s in self.system if s.text)
-            if system_text:
-                msgs.append({'role': 'system', 'content': system_text})
-        for msg in messages:
-            msgs.extend(self._message_to_openai(msg))
-        payload = {'messages': msgs}
-        if self.tool_config:
-            tools = [{'type': 'function', 'function': {
-                'name': t.tool_spec.name, 'description': t.tool_spec.description,
-                'parameters': t.tool_spec.input_schema.get('json', {})
-            }} for t in self.tool_config.tools if t.tool_spec]
-            if tools:
-                payload['tools'] = tools
-            if self.tool_config.tool_choice:
-                tc = self.tool_config.tool_choice
-                if tc.tool:
-                    payload['tool_choice'] = {'type': 'function', 'function': {'name': tc.tool.name}}
-                elif tc.any:
-                    payload['tool_choice'] = 'required'
-                elif tc.auto:
-                    payload['tool_choice'] = 'auto'
-        if self.inference_config:
-            ic = self.inference_config
-            if ic.max_tokens is not None:
-                payload['max_tokens'] = ic.max_tokens
-            if ic.temperature is not None:
-                payload['temperature'] = ic.temperature
-            if ic.top_p is not None:
-                payload['top_p'] = ic.top_p
-            if ic.stop_sequences:
-                payload['stop'] = ic.stop_sequences
-        return payload
-
-    def _message_to_openai(self, msg):
-        results = []
-        tool_results = [c for c in msg.content if c.tool_result]
-        other = [c for c in msg.content if not c.tool_result and not c.cache_point]
-        for c in tool_results:
-            tr = c.tool_result
-            parts = []
-            for trc in tr.content:
-                if trc.text:
-                    parts.append(trc.text)
-                elif trc.json is not None:
-                    parts.append(json.dumps(trc.json))
-            results.append({'role': 'tool', 'tool_call_id': tr.tool_use_id, 'content': '\n'.join(parts)})
-        if not other:
-            return results
-        if msg.role == 'assistant':
-            openai_msg = {'role': 'assistant'}
-            texts, tool_calls = [], []
-            for c in other:
-                if c.text:
-                    texts.append(c.text)
-                elif c.tool_use:
-                    tool_calls.append({
-                        'id': c.tool_use.tool_use_id, 'type': 'function',
-                        'function': {'name': c.tool_use.name, 'arguments': json.dumps(c.tool_use.input) if isinstance(c.tool_use.input, dict) else str(c.tool_use.input)}
-                    })
-            if texts:
-                openai_msg['content'] = '\n'.join(texts)
-            if tool_calls:
-                openai_msg['tool_calls'] = tool_calls
-            results.append(openai_msg)
-        else:
-            parts = []
-            has_multimodal = False
-            for c in other:
-                if c.text:
-                    parts.append({'type': 'text', 'text': c.text})
-                elif c.image:
-                    has_multimodal = True
-                    b64 = base64.b64encode(c.image.source.bytes).decode()
-                    parts.append({'type': 'image_url', 'image_url': {'url': f'data:image/{c.image.format};base64,{b64}'}})
-                elif c.document:
-                    b64 = base64.b64encode(c.document.source.bytes).decode()
-                    parts.append({'type': 'text', 'text': f'[Document: {c.document.name}.{c.document.format}]\n{b64}'})
-            if has_multimodal or len(parts) > 1:
-                results.append({'role': 'user', 'content': parts})
-            elif parts:
-                results.append({'role': 'user', 'content': parts[0].get('text', '')})
-        return results
-
-    def _parse_openai_response(self, result, latency_ms):
-        choices = result.get('choices') or []
-        if not choices:
-            return ConverseResponse(
-                output=ConverseOutput(message=Message(role='assistant', content=[MessageContent(text='')])),
-                stop_reason='end_turn',
-                usage=TokenUsage(input_tokens=0, output_tokens=0, total_tokens=0),
-                metrics=ConverseMetrics(latency_ms=latency_ms)
-            )
-        choice = choices[0]
-        msg = choice['message']
-        content = []
-        if msg.get('content'):
-            content.append(MessageContent(text=msg['content']))
-        for tc in msg.get('tool_calls', []):
-            args = tc['function']['arguments']
-            if isinstance(args, str):
-                try:
-                    args = json.loads(args)
-                except json.JSONDecodeError:
-                    try:
-                        args = json5.loads(json_repair.repair_json(args))
-                    except Exception:
-                        args = {"raw_input": args}
-            content.append(MessageContent(tool_use=ToolUse(
-                tool_use_id=tc['id'], name=tc['function']['name'], input=args
-            )))
-        usage_data = result.get('usage', {})
-        stop_map = {'stop': 'end_turn', 'length': 'max_tokens', 'tool_calls': 'tool_use'}
-        stop_reason = stop_map.get(choice.get('finish_reason', ''), 'end_turn')
-        return ConverseResponse(
-            output=ConverseOutput(message=Message(role='assistant', content=content)),
-            stop_reason=stop_reason,
-            usage=TokenUsage(
-                input_tokens=usage_data.get('prompt_tokens', 0),
-                output_tokens=usage_data.get('completion_tokens', 0),
-                total_tokens=usage_data.get('total_tokens', 0)
-            ),
-            metrics=ConverseMetrics(latency_ms=latency_ms)
-        )
-
     def _get_response(self, messages=None):
         for callback in self.callbacks:
-            try:
-                callback.on_converse_start(self)
-            except Exception as e:
-                logger.warning(f"Callback error: {e}")
-        if self.use_invoke_model:
-            payload = self._to_openai_payload(messages or self.messages)
-            start = time.time()
-            raw = self.client.invoke_model(
-                modelId=self.model_id, body=json.dumps(payload),
-                contentType='application/json', accept='application/json')
-            response = self._parse_openai_response(
-                json.loads(raw['body'].read()), int((time.time() - start) * 1000))
-        else:
-            self.remove_invalid_caching(messages)
-            payload = self.to_dict()
-            if messages:
-                payload['messages'] = [m.to_dict() for m in messages]
-            response = ConverseResponse.from_dict(self.client.converse(**payload))
+            try: callback.on_converse_start(self)
+            except Exception as e: logger.warning(f"Callback error: {e}")
+        self.remove_invalid_caching(messages)
+        payload = self.to_dict()
+        if messages:
+            payload['messages'] = [m.to_dict() for m in messages]
+        response = ConverseResponse.from_dict(self.client.converse(**payload))
         response.model_id = self.model_id
         for callback in self.callbacks:
-            try:
-                callback.on_converse_end(response)
-            except Exception as e:
-                logger.warning(f"Callback error: {e}")
+            try: callback.on_converse_end(response)
+            except Exception as e: logger.warning(f"Callback error: {e}")
         return response
 
     def remove_invalid_caching(self, messages):
@@ -958,35 +815,20 @@ class Converse(ToDictMixin, FromDictMixin):
     async def _aget_response(self, messages=None):
         for callback in self.callbacks:
             try:
-                if hasattr(callback, 'on_converse_start'):
-                    callback.on_converse_start(self)
-            except Exception as e:
-                logger.warning(f"Callback error: {e}")
+                if hasattr(callback, 'on_converse_start'): callback.on_converse_start(self)
+            except Exception as e: logger.warning(f"Callback error: {e}")
         loop = asyncio.get_event_loop()
-        if self.use_invoke_model:
-            payload = self._to_openai_payload(messages or self.messages)
-            start = time.time()
-            def _do_invoke():
-                r = self.client.invoke_model(
-                    modelId=self.model_id, body=json.dumps(payload),
-                    contentType='application/json', accept='application/json')
-                return json.loads(r['body'].read())
-            result = await loop.run_in_executor(None, _do_invoke)
-            response = self._parse_openai_response(result, int((time.time() - start) * 1000))
-        else:
-            self.remove_invalid_caching(messages)
-            payload = self.to_dict()
-            if messages:
-                payload['messages'] = [m.to_dict() for m in messages]
-            response_dict = await loop.run_in_executor(None, lambda: self.client.converse(**payload))
-            response = ConverseResponse.from_dict(response_dict)
+        self.remove_invalid_caching(messages)
+        payload = self.to_dict()
+        if messages:
+            payload['messages'] = [m.to_dict() for m in messages]
+        response_dict = await loop.run_in_executor(None, lambda: self.client.converse(**payload))
+        response = ConverseResponse.from_dict(response_dict)
         response.model_id = self.model_id
         for callback in self.callbacks:
             try:
-                if hasattr(callback, 'on_converse_end'):
-                    callback.on_converse_end(response)
-            except Exception as e:
-                logger.warning(f"Callback error: {e}")
+                if hasattr(callback, 'on_converse_end'): callback.on_converse_end(response)
+            except Exception as e: logger.warning(f"Callback error: {e}")
         return response
 
     def converse(self, message: Message | str = None):
@@ -1122,7 +964,6 @@ class Converse(ToDictMixin, FromDictMixin):
             _async_client=self._async_client,
             aws_access_key_id=self.aws_access_key_id,
             aws_secret_access_key=self.aws_secret_access_key,
-            use_invoke_model=self.use_invoke_model,
             output_model=output_model,
             force_choice=force_choice,
             skip_add_tool=skip_add_tool,

@@ -345,19 +345,6 @@ class TestConverseInvoke(unittest.TestCase):
         self.mock_client.converse.assert_called_once()
         self.assertEqual(resp.content, "Hi there")
 
-    def test_invoke_with_use_invoke_model(self):
-        self.c.use_invoke_model = True
-        body_response = json.dumps({
-            "choices": [{"message": {"content": "Hi"}, "finish_reason": "stop"}],
-            "usage": {"prompt_tokens": 5, "completion_tokens": 3, "total_tokens": 8}
-        }).encode()
-        mock_body = MagicMock()
-        mock_body.read.return_value = body_response
-        self.mock_client.invoke_model.return_value = {"body": mock_body}
-        resp = self.c.invoke("Hello")
-        self.mock_client.invoke_model.assert_called_once()
-        self.assertEqual(resp.content, "Hi")
-
     def test_converse_appends_messages(self):
         self.mock_client.converse.return_value = _make_response_dict("Reply")
         self.c.converse("Hello")
@@ -705,96 +692,6 @@ class TestStructuredMaverick(unittest.TestCase):
     def test_structured_model_factory(self):
         self.assertEqual(structured_model_factory("llama4-maverick-instruct"), StructuredMaverick)
         self.assertEqual(structured_model_factory("anthropic.claude-3-5-sonnet"), StructuredConverse)
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-#  9. OpenAI payload conversion
-# ══════════════════════════════════════════════════════════════════════════════
-
-class TestOpenAIConversion(unittest.TestCase):
-    def test_to_openai_payload_basic(self):
-        c = Converse(model_id="m")
-        c.add_system("Be helpful")
-        c.inference_config = ConverseInferenceConfig(max_tokens=100, temperature=0.5)
-        msgs = [Message().add_text("Hello")]
-        payload = c._to_openai_payload(msgs)
-        self.assertEqual(payload["messages"][0]["role"], "system")
-        self.assertEqual(payload["messages"][1]["role"], "user")
-        self.assertEqual(payload["max_tokens"], 100)
-
-    def test_message_to_openai_text(self):
-        c = Converse(model_id="m")
-        m = Message(role="user").add_text("Hi")
-        result = c._message_to_openai(m)
-        self.assertEqual(result[0]["content"], "Hi")
-
-    def test_message_to_openai_image(self):
-        c = Converse(model_id="m")
-        m = Message(role="user")
-        m.add_text("Look at this")
-        m.add_image(b'\x89PNG', 'png')
-        result = c._message_to_openai(m)
-        self.assertEqual(result[0]["content"][1]["type"], "image_url")
-
-    def test_message_to_openai_tool_use(self):
-        c = Converse(model_id="m")
-        m = Message(role="assistant")
-        m.content.append(MessageContent(
-            tool_use=ToolUse(tool_use_id="t1", name="my_tool", input={"x": 1})))
-        result = c._message_to_openai(m)
-        self.assertEqual(result[0]["tool_calls"][0]["function"]["name"], "my_tool")
-
-    def test_message_to_openai_tool_result(self):
-        c = Converse(model_id="m")
-        m = Message(role="user")
-        m.content.append(MessageContent(
-            tool_result=ToolResult(
-                tool_use_id="t1",
-                content=[ToolResultContent(text="result data")],
-                status="success")))
-        result = c._message_to_openai(m)
-        self.assertEqual(result[0]["role"], "tool")
-
-    def test_parse_openai_response_basic(self):
-        c = Converse(model_id="m")
-        openai_resp = {
-            "choices": [{"message": {"content": "Hello!"}, "finish_reason": "stop"}],
-            "usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15}
-        }
-        resp = c._parse_openai_response(openai_resp, 100)
-        self.assertEqual(resp.content, "Hello!")
-        self.assertEqual(resp.stop_reason, "end_turn")
-        self.assertEqual(resp.usage.input_tokens, 10)
-
-    def test_parse_openai_response_empty_choices(self):
-        c = Converse(model_id="m")
-        resp = c._parse_openai_response({"choices": []}, 50)
-        self.assertEqual(resp.content, "")
-
-    def test_parse_openai_response_tool_calls(self):
-        c = Converse(model_id="m")
-        openai_resp = {
-            "choices": [{"message": {
-                "content": None,
-                "tool_calls": [{"id": "t1", "type": "function",
-                               "function": {"name": "my_tool", "arguments": '{"x": 1}'}}]
-            }, "finish_reason": "tool_calls"}],
-            "usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15}
-        }
-        resp = c._parse_openai_response(openai_resp, 100)
-        self.assertEqual(resp.stop_reason, "tool_use")
-        self.assertIsNotNone(resp.output.message.content[0].tool_use)
-
-    def test_to_openai_payload_with_tools(self):
-        c = Converse(model_id="m")
-        c.tool_config = ConverseToolConfig(
-            tools=[Tool(tool_spec=ToolSpec(name="fn", description="desc",
-                                          input_schema={"json": {"type": "object", "properties": {}}}))],
-            tool_choice=ToolChoice(auto=ToolChoiceAuto()))
-        msgs = [Message().add_text("Hi")]
-        payload = c._to_openai_payload(msgs)
-        self.assertEqual(len(payload["tools"]), 1)
-        self.assertEqual(payload["tool_choice"], "auto")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
