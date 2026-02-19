@@ -684,7 +684,7 @@ class ConverseCost:
 
     @property
     def total_cost(self):
-        return sum([self.input_cost, self.output_cost, self.cached_write_cost, self.cached_write_cost])
+        return sum([self.input_cost, self.output_cost, self.cached_write_cost, self.cached_read_cost])
 
 
 @dataclass
