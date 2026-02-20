@@ -2,39 +2,22 @@ import base64
 import json
 import logging
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from functools import cached_property
-from typing import Optional, List
+from typing import Optional
 
-import httpx
-from botocore.auth import SigV4Auth
-from botocore.awsrequest import AWSRequest
 from openai import OpenAI, AsyncOpenAI
 
 from .converse import (Converse, ConverseAgent, StructuredConverse, ConverseResponse, ConverseOutput,
                        Message, MessageContent, ToolUse, TokenUsage, ConverseMetrics,
                        ReasoningContent, ReasoningText)
-from .bases import BaseCallbackHandler
 
 logger = logging.getLogger(__name__)
 
 STOP_REASON_MAP = {'stop': 'end_turn', 'length': 'max_tokens', 'tool_calls': 'tool_use'}
 
 
-class SigV4Auth_httpx(httpx.Auth):
-    def __init__(self, credentials, region):
-        self.credentials = credentials
-        self.region = region
-
-    def auth_flow(self, request):
-        aws_request = AWSRequest(method=request.method, url=str(request.url), data=request.content, headers=dict(request.headers))
-        SigV4Auth(self.credentials, 'bedrock', self.region).add_auth(aws_request)
-        request.headers.update(aws_request.headers)
-        yield request
-
-
 class _MantleTransport:
-    """Mixin that overrides transport to use Mantle OpenAI-compatible endpoint."""
     api_key: Optional[str] = None
 
     @property
@@ -42,23 +25,18 @@ class _MantleTransport:
         region = self.region_name or self.session.region_name
         return f'https://bedrock-mantle.{region}.api.aws/v1'
 
+    def _get_client(self, openai_class):
+        if self.api_key:
+            return openai_class(api_key=self.api_key, base_url=self._mantle_base_url)
+        return openai_class(base_url=self._mantle_base_url)
+
     @cached_property
     def openai_client(self) -> OpenAI:
-        if self.api_key:
-            return OpenAI(api_key=self.api_key, base_url=self._mantle_base_url)
-        region = self.region_name or self.session.region_name
-        credentials = self.session.get_credentials().get_frozen_credentials()
-        transport = httpx.Client(auth=SigV4Auth_httpx(credentials, region))
-        return OpenAI(api_key='unused', base_url=self._mantle_base_url, http_client=transport)
+        return self._get_client(OpenAI)
 
     @cached_property
     def async_openai_client(self) -> AsyncOpenAI:
-        if self.api_key:
-            return AsyncOpenAI(api_key=self.api_key, base_url=self._mantle_base_url)
-        region = self.region_name or self.session.region_name
-        credentials = self.session.get_credentials().get_frozen_credentials()
-        transport = httpx.AsyncClient(auth=SigV4Auth_httpx(credentials, region))
-        return AsyncOpenAI(api_key='unused', base_url=self._mantle_base_url, http_client=transport)
+        return self._get_client(AsyncOpenAI)
 
     def _build_tool_params(self, params):
         if not self.tool_config:
