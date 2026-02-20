@@ -13,6 +13,7 @@ from bedrock.mantle import Mantle, MantleAgent, StructuredMantle
 from bedrock.converse import (
     Message, MessageContent, ToolUse, ToolResult, ToolResultContent,
     SystemContent, CachePoint, ConverseInferenceConfig, Finish,
+    ReasoningContent, ReasoningText,
 )
 from bedrock.tools import tool
 from bedrock.bases import BaseCallbackHandler
@@ -23,10 +24,12 @@ class TestOutput(BaseModel):
 
 
 def _mock_completion(content="Hello!", tool_calls=None, finish_reason="stop",
-                     prompt_tokens=10, completion_tokens=5, total_tokens=15):
-    """Build a mock ChatCompletion object matching openai SDK structure."""
+                     prompt_tokens=10, completion_tokens=5, total_tokens=15,
+                     reasoning=None, cached_tokens=None):
     message = MagicMock()
     message.content = content if not tool_calls else None
+    message.reasoning = reasoning
+    message.reasoning_content = None
     if tool_calls:
         mock_tcs = []
         for tc in tool_calls:
@@ -45,6 +48,12 @@ def _mock_completion(content="Hello!", tool_calls=None, finish_reason="stop",
     usage.prompt_tokens = prompt_tokens
     usage.completion_tokens = completion_tokens
     usage.total_tokens = total_tokens
+    if cached_tokens is not None:
+        details = MagicMock()
+        details.cached_tokens = cached_tokens
+        usage.prompt_tokens_details = details
+    else:
+        usage.prompt_tokens_details = None
     completion = MagicMock()
     completion.choices = [choice]
     completion.usage = usage
@@ -277,6 +286,50 @@ class TestMantleEndpoint(unittest.TestCase):
         m = Mantle(model_id="m", region_name="eu-west-1")
         with patch.object(type(m), 'session', new_callable=lambda: property(lambda self: _make_mock_session())):
             self.assertEqual(m._mantle_base_url, "https://bedrock-mantle.eu-west-1.api.aws/v1")
+
+
+class TestMantleParseCompletion(unittest.TestCase):
+    def _make_mantle(self):
+        m = Mantle(model_id="anthropic.claude-3-5-sonnet", region_name="us-east-1")
+        mock_client = MagicMock()
+        m.__dict__['openai_client'] = mock_client
+        return m, mock_client
+
+    def test_reasoning_trace_in_response(self):
+        m, client = self._make_mantle()
+        client.chat.completions.create.return_value = _mock_completion(
+            content="The answer is 42.", reasoning="Let me think step by step...")
+        resp = m.invoke("Think about this")
+        self.assertEqual(len(resp.output.message.content), 2)
+        reasoning_block = resp.output.message.content[0]
+        self.assertIsNotNone(reasoning_block.reasoning_content)
+        self.assertEqual(reasoning_block.reasoning_content.reasoning_text.text, "Let me think step by step...")
+        self.assertEqual(reasoning_block.reasoning_content.reasoning_text.signature, '')
+        text_block = resp.output.message.content[1]
+        self.assertEqual(text_block.text, "The answer is 42.")
+
+    def test_cached_tokens_in_usage(self):
+        m, client = self._make_mantle()
+        client.chat.completions.create.return_value = _mock_completion(
+            content="Hi", cached_tokens=500)
+        resp = m.invoke("Hello")
+        self.assertEqual(resp.usage.cache_read_input_tokens, 500)
+
+    def test_no_cached_tokens_defaults_zero(self):
+        m, client = self._make_mantle()
+        client.chat.completions.create.return_value = _mock_completion(content="Hi")
+        resp = m.invoke("Hello")
+        self.assertEqual(resp.usage.cache_read_input_tokens, 0)
+
+    def test_reasoning_before_tool_calls(self):
+        m, client = self._make_mantle()
+        client.chat.completions.create.return_value = _mock_completion(
+            tool_calls=[_tool_call("my_tool", {"key": "val"})],
+            finish_reason="tool_calls", reasoning="I should use the tool")
+        resp = m.invoke("Use tool")
+        self.assertEqual(len(resp.output.message.content), 2)
+        self.assertIsNotNone(resp.output.message.content[0].reasoning_content)
+        self.assertIsNotNone(resp.output.message.content[1].tool_use)
 
 
 if __name__ == '__main__':

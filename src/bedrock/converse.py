@@ -463,7 +463,7 @@ class ThinkingConfig(ToDictMixin):
     _SKIP_CAMEL_CASE = True  # AWS Bedrock expects snake_case for thinking config
 
     type: Literal["enabled", "disabled"] = "enabled"
-    budget_tokens: int = 1024
+    budget_tokens: int | str = 1024
 
 
 @dataclass
@@ -920,7 +920,7 @@ class Converse(ToDictMixin, FromDictMixin):
             and self.additional_model_request_fields.thinking.type == "enabled"
         )
 
-    def with_thinking(self, tokens: int = 1024, enabled: bool = True):
+    def with_thinking(self, tokens: int | str = 1024, enabled: bool = True):
         thinking_config = ThinkingConfig(
             type="enabled" if enabled else "disabled",
             budget_tokens=tokens

@@ -12,7 +12,8 @@ from botocore.awsrequest import AWSRequest
 from openai import OpenAI, AsyncOpenAI
 
 from .converse import (Converse, ConverseAgent, StructuredConverse, ConverseResponse, ConverseOutput,
-                       Message, MessageContent, ToolUse, TokenUsage, ConverseMetrics)
+                       Message, MessageContent, ToolUse, TokenUsage, ConverseMetrics,
+                       ReasoningContent, ReasoningText)
 from .bases import BaseCallbackHandler
 
 logger = logging.getLogger(__name__)
@@ -59,6 +60,45 @@ class _MantleTransport:
         transport = httpx.AsyncClient(auth=SigV4Auth_httpx(credentials, region))
         return AsyncOpenAI(api_key='unused', base_url=self._mantle_base_url, http_client=transport)
 
+    def _build_tool_params(self, params):
+        if not self.tool_config:
+            return
+        tools = [{'type': 'function', 'function': {
+            'name': t.tool_spec.name, 'description': t.tool_spec.description,
+            'parameters': t.tool_spec.input_schema.get('json', {})
+        }} for t in self.tool_config.tools if t.tool_spec]
+        if tools:
+            params['tools'] = tools
+        if self.tool_config.tool_choice:
+            tc = self.tool_config.tool_choice
+            if tc.tool:
+                params['tool_choice'] = {'type': 'function', 'function': {'name': tc.tool.name}}
+            elif tc.any:
+                params['tool_choice'] = 'required'
+            elif tc.auto:
+                params['tool_choice'] = 'auto'
+
+    def _build_inference_params(self, params):
+        if not self.inference_config:
+            return
+        ic = self.inference_config
+        if ic.max_tokens is not None: params['max_tokens'] = ic.max_tokens
+        if ic.temperature is not None: params['temperature'] = ic.temperature
+        if ic.top_p is not None: params['top_p'] = ic.top_p
+        if ic.stop_sequences: params['stop'] = ic.stop_sequences
+
+    def _build_thinking_params(self, params):
+        if not (self.additional_model_request_fields and self.additional_model_request_fields.thinking
+                and self.additional_model_request_fields.thinking.type == 'enabled'):
+            return
+        budget = self.additional_model_request_fields.thinking.budget_tokens
+        if isinstance(budget, str):
+            params['reasoning_effort'] = budget
+        else:
+            if budget <= 2048: params['reasoning_effort'] = 'low'
+            elif budget <= 8192: params['reasoning_effort'] = 'medium'
+            else: params['reasoning_effort'] = 'high'
+
     def _build_params(self, messages=None) -> dict:
         self.remove_invalid_caching(messages)
         msgs = []
@@ -69,76 +109,61 @@ class _MantleTransport:
         for msg in (messages or self.messages):
             msgs.extend(self._convert_message(msg))
         params = {'model': self.model_id, 'messages': msgs}
-        if self.tool_config:
-            tools = [{'type': 'function', 'function': {
-                'name': t.tool_spec.name, 'description': t.tool_spec.description,
-                'parameters': t.tool_spec.input_schema.get('json', {})
-            }} for t in self.tool_config.tools if t.tool_spec]
-            if tools:
-                params['tools'] = tools
-            if self.tool_config.tool_choice:
-                tc = self.tool_config.tool_choice
-                if tc.tool:
-                    params['tool_choice'] = {'type': 'function', 'function': {'name': tc.tool.name}}
-                elif tc.any:
-                    params['tool_choice'] = 'required'
-                elif tc.auto:
-                    params['tool_choice'] = 'auto'
-        if self.inference_config:
-            ic = self.inference_config
-            if ic.max_tokens is not None: params['max_tokens'] = ic.max_tokens
-            if ic.temperature is not None: params['temperature'] = ic.temperature
-            if ic.top_p is not None: params['top_p'] = ic.top_p
-            if ic.stop_sequences: params['stop'] = ic.stop_sequences
-        if (self.additional_model_request_fields and self.additional_model_request_fields.thinking
-                and self.additional_model_request_fields.thinking.type == 'enabled'):
-            budget = self.additional_model_request_fields.thinking.budget_tokens
-            if budget <= 2048: params['reasoning_effort'] = 'low'
-            elif budget <= 8192: params['reasoning_effort'] = 'medium'
-            else: params['reasoning_effort'] = 'high'
+        self._build_tool_params(params)
+        self._build_inference_params(params)
+        self._build_thinking_params(params)
         return params
 
-    def _convert_message(self, msg):
+    def _convert_tool_results(self, content_list):
         results = []
-        tool_results = [c for c in msg.content if c.tool_result]
-        other = [c for c in msg.content if not c.tool_result and not c.cache_point]
-        for c in tool_results:
+        for c in content_list:
+            if not c.tool_result:
+                continue
             tr = c.tool_result
             parts = []
             for trc in tr.content:
                 if trc.text: parts.append(trc.text)
                 elif trc.json is not None: parts.append(json.dumps(trc.json))
             results.append({'role': 'tool', 'tool_call_id': tr.tool_use_id, 'content': '\n'.join(parts)})
-        if not other:
-            return results
-        if msg.role == 'assistant':
-            openai_msg = {'role': 'assistant'}
-            texts, tool_calls = [], []
-            for c in other:
-                if c.text: texts.append(c.text)
-                elif c.tool_use:
-                    tool_calls.append({'id': c.tool_use.tool_use_id, 'type': 'function',
-                        'function': {'name': c.tool_use.name, 'arguments': json.dumps(c.tool_use.input) if isinstance(c.tool_use.input, dict) else str(c.tool_use.input)}})
-            if texts: openai_msg['content'] = '\n'.join(texts)
-            if tool_calls: openai_msg['tool_calls'] = tool_calls
-            results.append(openai_msg)
-        else:
-            parts = []
-            has_multimodal = False
-            for c in other:
-                if c.text: parts.append({'type': 'text', 'text': c.text})
-                elif c.image:
-                    has_multimodal = True
-                    b64 = base64.b64encode(c.image.source.bytes).decode()
-                    parts.append({'type': 'image_url', 'image_url': {'url': f'data:image/{c.image.format};base64,{b64}'}})
-                elif c.document:
-                    b64 = base64.b64encode(c.document.source.bytes).decode()
-                    parts.append({'type': 'text', 'text': f'[Document: {c.document.name}.{c.document.format}]\n{b64}'})
-            if has_multimodal or len(parts) > 1:
-                results.append({'role': 'user', 'content': parts})
-            elif parts:
-                results.append({'role': 'user', 'content': parts[0].get('text', '')})
         return results
+
+    def _convert_assistant(self, content_list):
+        openai_msg = {'role': 'assistant'}
+        texts, tool_calls = [], []
+        for c in content_list:
+            if c.text: texts.append(c.text)
+            elif c.tool_use:
+                tool_calls.append({'id': c.tool_use.tool_use_id, 'type': 'function',
+                    'function': {'name': c.tool_use.name, 'arguments': json.dumps(c.tool_use.input) if isinstance(c.tool_use.input, dict) else str(c.tool_use.input)}})
+        if texts: openai_msg['content'] = '\n'.join(texts)
+        if tool_calls: openai_msg['tool_calls'] = tool_calls
+        return [openai_msg]
+
+    def _convert_user(self, content_list):
+        parts, has_multimodal = [], False
+        for c in content_list:
+            if c.text: parts.append({'type': 'text', 'text': c.text})
+            elif c.image:
+                has_multimodal = True
+                b64 = base64.b64encode(c.image.source.bytes).decode()
+                parts.append({'type': 'image_url', 'image_url': {'url': f'data:image/{c.image.format};base64,{b64}'}})
+            elif c.document:
+                b64 = base64.b64encode(c.document.source.bytes).decode()
+                parts.append({'type': 'text', 'text': f'[Document: {c.document.name}.{c.document.format}]\n{b64}'})
+        if not parts:
+            return []
+        if has_multimodal or len(parts) > 1:
+            return [{'role': 'user', 'content': parts}]
+        return [{'role': 'user', 'content': parts[0].get('text', '')}]
+
+    def _convert_message(self, msg):
+        tool_results = self._convert_tool_results(msg.content)
+        other = [c for c in msg.content if not c.tool_result and not c.cache_point]
+        if not other:
+            return tool_results
+        if msg.role == 'assistant':
+            return tool_results + self._convert_assistant(other)
+        return tool_results + self._convert_user(other)
 
     def _parse_completion(self, completion, latency_ms) -> ConverseResponse:
         if not completion.choices:
@@ -147,6 +172,10 @@ class _MantleTransport:
                 stop_reason='end_turn', usage=TokenUsage(), metrics=ConverseMetrics(latency_ms=latency_ms))
         choice = completion.choices[0]
         content = []
+        reasoning = getattr(choice.message, 'reasoning', None) or getattr(choice.message, 'reasoning_content', None)
+        if reasoning:
+            content.append(MessageContent(reasoning_content=ReasoningContent(
+                reasoning_text=ReasoningText(text=reasoning, signature=''), redacted_content=b'')))
         if choice.message.content:
             content.append(MessageContent(text=choice.message.content))
         for tc in (choice.message.tool_calls or []):
@@ -156,12 +185,18 @@ class _MantleTransport:
                 except json.JSONDecodeError: args = {"raw_input": args}
             content.append(MessageContent(tool_use=ToolUse(tool_use_id=tc.id, name=tc.function.name, input=args)))
         usage = completion.usage
+        cache_read = 0
+        if usage:
+            details = getattr(usage, 'prompt_tokens_details', None)
+            if details:
+                cache_read = getattr(details, 'cached_tokens', 0) or 0
         return ConverseResponse(
             output=ConverseOutput(message=Message(role='assistant', content=content)),
             stop_reason=STOP_REASON_MAP.get(choice.finish_reason or '', 'end_turn'),
             usage=TokenUsage(input_tokens=usage.prompt_tokens if usage else 0,
                              output_tokens=usage.completion_tokens if usage else 0,
-                             total_tokens=usage.total_tokens if usage else 0),
+                             total_tokens=usage.total_tokens if usage else 0,
+                             cache_read_input_tokens=cache_read),
             metrics=ConverseMetrics(latency_ms=latency_ms))
 
     def _get_response(self, messages=None):
