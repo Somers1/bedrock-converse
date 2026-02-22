@@ -1285,12 +1285,12 @@ class ConverseAgent(Converse):
                             status="error"
                         )
                     tool_results.append(tool_result)
-            if not tool_results and self._on_text:
+            if self._on_text:
                 text_parts = [c.text for c in response.output.message.content if c.text]
                 if text_parts:
-                    result = self._on_text('\n'.join(text_parts))
-                    if result is not None:
-                        return result
+                    on_text_result = self._on_text('\n'.join(text_parts))
+                    if not tool_results and on_text_result is not None:
+                        return on_text_result
             if tool_results:
                 tool_message = Message(role="user")
                 for result in tool_results:
