@@ -550,14 +550,16 @@ class TestConverseAgent(unittest.TestCase):
         self.assertEqual(result, "The answer is 42")
         self.assertEqual(agent._client.converse.call_count, 2)
 
-    def test_run_max_iterations(self):
+    def test_run_text_only_exits_immediately(self):
         agent = self._make_agent()
-        agent.max_iterations = 2
-        # Always returns text, never calls exit
+        agent.max_iterations = 5
+        # Returns text with no tool calls — should exit on first iteration
         resp = _make_response_dict("Thinking...", stop_reason="end_turn")
         agent._client.converse.return_value = resp
         result = agent.run("Do something")
-        self.assertIn("maximum iterations", result)
+        self.assertEqual(result, "Thinking...")
+        # Should only call API once (not loop)
+        self.assertEqual(agent._client.converse.call_count, 1)
 
     def test_with_structured_output(self):
         agent = self._make_agent()

@@ -1291,6 +1291,12 @@ class ConverseAgent(Converse):
                     on_text_result = self._on_text('\n'.join(text_parts))
                     if not tool_results and on_text_result is not None:
                         return on_text_result
+            # If no tools were called, the model is done — return text or None
+            # Without this, the loop continues with an assistant message at the end,
+            # which causes "must end with user message" errors on the next API call
+            if not tool_results:
+                text_parts = [c.text for c in response.output.message.content if c.text]
+                return '\n'.join(text_parts) if text_parts else None
             if tool_results:
                 tool_message = Message(role="user")
                 for result in tool_results:
