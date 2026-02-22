@@ -336,15 +336,15 @@ class CachePoint(ToDictMixin):
 
 
 @dataclass
-class ReasoningText(ToDictMixin):
+class ReasoningText(ToDictMixin, FromDictMixin):
     text: str
     signature: str
 
 
 @dataclass
-class ReasoningContent(ToDictMixin):
-    reasoning_text: ReasoningText
-    redacted_content: ByteString
+class ReasoningContent(ToDictMixin, FromDictMixin):
+    reasoning_text: Optional[ReasoningText] = None
+    redacted_content: Optional[ByteString] = None
 
 
 @dataclass
