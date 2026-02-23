@@ -333,6 +333,13 @@ class GuardContent(ToDictMixin):
 @dataclass
 class CachePoint(ToDictMixin):
     type: Literal["default"] = "default"
+    ttl: Literal["5m", "1h"] | None = None
+
+    def to_dict(self):
+        d = {"type": self.type}
+        if self.ttl is not None:
+            d["ttl"] = self.ttl
+        return d
 
 
 @dataclass
@@ -432,8 +439,8 @@ class ConverseToolConfig(ToDictMixin):
     tools: List[Tool] = field(default_factory=list)
     tool_choice: Optional[ToolChoice] = None
 
-    def add_cache_point(self):
-        self.tools.append(Tool(cache_point=CachePoint()))
+    def add_cache_point(self, ttl: Literal["5m", "1h"] | None = None):
+        self.tools.append(Tool(cache_point=CachePoint(ttl=ttl)))
 
 
 @dataclass
@@ -527,8 +534,8 @@ class Message(ToDictMixin, FromDictMixin):
                 logger.warning(f'Could not add image to prompt {image_format} is invalid: {e}')
         return self
 
-    def add_cache_point(self):
-        self.content.append(MessageContent(cache_point=CachePoint()))
+    def add_cache_point(self, ttl: Literal["5m", "1h"] | None = None):
+        self.content.append(MessageContent(cache_point=CachePoint(ttl=ttl)))
         return self
 
     def get_document_names(self):
@@ -901,8 +908,8 @@ class Converse(ToDictMixin, FromDictMixin):
         self.system.append(SystemContent(text=system))
         return self
 
-    def add_system_cache_point(self):
-        self.system.append(SystemContent(cache_point=CachePoint()))
+    def add_system_cache_point(self, ttl: Literal["5m", "1h"] | None = None):
+        self.system.append(SystemContent(cache_point=CachePoint(ttl=ttl)))
         return self
 
     def set_tool_choice(self, tool_name):
