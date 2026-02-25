@@ -126,7 +126,16 @@ class ToolRegistry:
         else:
             raise ValueError(f"Object {tool} is not a valid tool (not decorated with @tool or not a Tools instance)")
 
+    def _resolve_tool_name(self, tool_name: str) -> str:
+        if tool_name in self.tools:
+            return tool_name
+        matches = [k for k in self.tools if k.endswith(f"_{tool_name}")]
+        if len(matches) == 1:
+            return matches[0]
+        return tool_name
+
     def execute(self, tool_name: str, arguments: dict) -> Any:
+        tool_name = self._resolve_tool_name(tool_name)
         if tool_name not in self.tools:
             raise ValueError(f"Tool '{tool_name}' not found in registry")
 
