@@ -1278,7 +1278,7 @@ class ConverseAgent(Converse):
                     if self.debug:
                         logger.warning(f'Called {tool_name} for {tool_input}')
                     try:
-                        if tool_name == self.exit_tool.tool_spec.name:
+                        if self.exit_tool and tool_name == self.exit_tool.tool_spec.name:
                             if self.structured_output:
                                 result = self.structured_output.model_validate(tool_input)
                             elif tool_name == 'Finish':
