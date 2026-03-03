@@ -1254,7 +1254,7 @@ class ConverseAgent(Converse):
 
         if self.structured_output:
             self.bind_exit_tool(self.structured_output)
-        elif self.exit_tool is None:
+        elif self.exit_tool is None and not self._on_text:
             self.bind_exit_tool(Finish)
 
         if isinstance(message, str):
