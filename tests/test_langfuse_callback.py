@@ -143,7 +143,17 @@ class TestLangfuseEnabled:
             inference_config=SimpleNamespace(max_tokens=123, temperature=0.2, top_p=0.9, stop_sequences=["stop"]),
             request_metadata={"request_id": "abc"},
             performance_config=SimpleNamespace(latency="standard"),
-            tool_config=SimpleNamespace(tools=[]),
+            tool_config=SimpleNamespace(
+                tools=[
+                    SimpleNamespace(
+                        tool_spec=SimpleNamespace(
+                            name="get_weather",
+                            input_schema={"json": {"type": "object", "properties": {"city": {"type": "string"}}}},
+                        ),
+                        cache_point=SimpleNamespace(to_dict=lambda: {"type": "default", "ttl": "5m"}),
+                    )
+                ]
+            ),
         )
 
         self.cb.on_converse_start(converse)
@@ -152,6 +162,9 @@ class TestLangfuseEnabled:
         assert start_kwargs["as_type"] == "generation"
         assert start_kwargs["input"]["messages"]["messages"][0]["content"][0]["text"] == user_text
         assert start_kwargs["input"]["system"]["prompts"][0]["text"] == system_text
+        assert start_kwargs["metadata"]["tool_names"] == ["get_weather"]
+        assert "get_weather" in start_kwargs["metadata"]["tool_schemas"]
+        assert start_kwargs["metadata"]["tool_cache_point_count"] == 1
 
         assistant_text = "a" * 9000
         response = SimpleNamespace(
@@ -227,7 +240,7 @@ class TestLangfuseEnabled:
         trace_update_calls = self.mock_trace.update.call_args_list
         assert trace_update_calls
         final_update_kwargs = trace_update_calls[-1].kwargs
-        assert final_update_kwargs["output"]["result"] == result_text
+        assert final_update_kwargs["output"] == result_text
 
         self.mock_trace.end.assert_called_once()
         self.mock_langfuse.flush.assert_called_once()

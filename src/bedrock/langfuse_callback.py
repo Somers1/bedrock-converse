@@ -201,6 +201,20 @@ class LangfuseCallback(BaseCallbackHandler):
             text_value = getattr(reasoning_text, "text", None) if reasoning_text else None
             summary["reasoning"] = _truncate_text(text_value, None)
 
+        guard_content = getattr(content, "guard_content", None)
+        if guard_content is not None:
+            if hasattr(guard_content, "to_dict") and callable(guard_content.to_dict):
+                summary["guard_content"] = cls._to_primitive(guard_content.to_dict())
+            else:
+                summary["guard_content"] = cls._to_primitive(guard_content)
+
+        cache_point = getattr(content, "cache_point", None)
+        if cache_point is not None:
+            if hasattr(cache_point, "to_dict") and callable(cache_point.to_dict):
+                summary["cache_point"] = cls._to_primitive(cache_point.to_dict())
+            else:
+                summary["cache_point"] = cls._to_primitive(cache_point)
+
         if getattr(content, "image", None) is not None and "image" not in summary:
             image = content.image
             source = getattr(image, "source", None)
@@ -394,10 +408,32 @@ class LangfuseCallback(BaseCallbackHandler):
         return filtered or None
 
     def _build_generation_metadata(self, converse: Any) -> Dict[str, Any]:
+        tool_config = getattr(converse, "tool_config", None)
+        tools = list(getattr(tool_config, "tools", None) or [])
+        tool_names = []
+        tool_schema_map = {}
+        tool_cache_points = 0
+        for tool in tools:
+            tool_spec = getattr(tool, "tool_spec", None)
+            cache_point = getattr(tool, "cache_point", None)
+            if cache_point is not None:
+                tool_cache_points += 1
+            if tool_spec is None:
+                continue
+            name = getattr(tool_spec, "name", None)
+            if name:
+                tool_names.append(name)
+                schema = getattr(tool_spec, "input_schema", None)
+                if schema is not None:
+                    tool_schema_map[name] = self._to_primitive(schema)
+
         metadata = {
             "request_metadata": self._to_primitive(getattr(converse, "request_metadata", None)),
             "performance_config": self._to_primitive(getattr(converse, "performance_config", None)),
             "tool_count": len(getattr(getattr(converse, "tool_config", None), "tools", None) or []),
+            "tool_names": tool_names or None,
+            "tool_schemas": tool_schema_map or None,
+            "tool_cache_point_count": tool_cache_points if tool_cache_points else None,
             "region_name": getattr(converse, "region_name", None),
         }
         return {k: v for k, v in metadata.items() if v is not None}
@@ -692,15 +728,10 @@ class LangfuseCallback(BaseCallbackHandler):
             return
 
         self._finalize_dangling_observations()
-        run_output = {
-            "result": self._to_primitive(result),
-            "messages": self._summarize_messages(getattr(agent, "messages", None) or []),
-            "system": self._summarize_system_prompts(getattr(agent, "system", None) or []),
-        }
 
         self._update_observation(
             self._trace,
-            output=run_output,
+            output=self._to_primitive(result),
             metadata={"result_type": type(result).__name__ if result is not None else None},
         )
         self._safe_end(self._trace)
@@ -842,7 +873,6 @@ class LangfuseCallback(BaseCallbackHandler):
                 output={
                     "error": error_text,
                     "error_type": error_type,
-                    "failed_request": self._build_generation_input(converse),
                 },
                 level="ERROR",
                 status_message=short_error_text,
