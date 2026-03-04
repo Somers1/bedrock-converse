@@ -1,8 +1,7 @@
 """Tests for LangfuseCallback and agent lifecycle hooks."""
 
 import time
-from dataclasses import dataclass
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, patch, call
 
 import pytest
 
@@ -31,7 +30,7 @@ def test_get_langfuse_returns_none_on_init_error():
 class TestLangfuseDisabled:
     def setup_method(self):
         self.cb = LangfuseCallback(user_id="u1", session_id="s1", tags=["test"])
-        self.cb._langfuse = None  # force disabled
+        self.cb._langfuse = None
 
     def test_enabled_is_false(self):
         assert self.cb.enabled is False
@@ -58,65 +57,62 @@ class TestLangfuseDisabled:
         self.cb.on_tool_end("tool", {}, "id1", "result", "success", 0.1)
 
 
-# --- Test LangfuseCallback with mocked langfuse ---
+# --- Test LangfuseCallback with mocked langfuse (v3 API) ---
 
 class TestLangfuseEnabled:
     def setup_method(self):
         self.cb = LangfuseCallback(user_id="u1", session_id="s1", tags=["heartbeat"], metadata={"env": "test"})
         self.mock_langfuse = MagicMock()
         self.cb._langfuse = self.mock_langfuse
-        self.mock_trace = MagicMock()
-        self.mock_langfuse.trace.return_value = self.mock_trace
+        self.mock_trace_span = MagicMock()
+        self.mock_langfuse.start_span.return_value = self.mock_trace_span
         self.mock_generation = MagicMock()
-        self.mock_trace.generation.return_value = self.mock_generation
-        self.mock_span = MagicMock()
-        self.mock_trace.span.return_value = self.mock_span
+        self.mock_trace_span.start_generation.return_value = self.mock_generation
+        self.mock_tool_span = MagicMock()
+        self.mock_trace_span.start_span.return_value = self.mock_tool_span
 
     def test_enabled_is_true(self):
         assert self.cb.enabled is True
 
-    def test_on_run_start_creates_trace(self):
+    def test_on_run_start_creates_span_and_updates_trace(self):
         agent = MagicMock()
         agent.model_id = "test-model"
         self.cb.on_run_start(agent)
-        self.mock_langfuse.trace.assert_called_once_with(
-            name="agent.run",
-            user_id="u1",
-            session_id="s1",
-            tags=["heartbeat"],
-            metadata={"env": "test", "model_id": "test-model"},
+        self.mock_langfuse.start_span.assert_called_once()
+        self.mock_trace_span.update_trace.assert_called_once_with(
+            user_id="u1", session_id="s1", tags=["heartbeat"]
         )
-        assert self.cb._trace is self.mock_trace
+        assert self.cb._trace is self.mock_trace_span
 
-    def test_on_run_end_updates_trace_and_flushes(self):
-        self.cb._trace = self.mock_trace
+    def test_on_run_end_updates_and_ends_span(self):
+        self.cb._trace = self.mock_trace_span
         self.cb.on_run_end(MagicMock(), "final result")
-        self.mock_trace.update.assert_called_once_with(output="final result")
+        self.mock_trace_span.update.assert_called_once_with(output="final result")
+        self.mock_trace_span.end.assert_called_once()
         self.mock_langfuse.flush.assert_called_once()
 
     def test_on_run_end_truncates_long_result(self):
-        self.cb._trace = self.mock_trace
-        long_result = "x" * 3000
-        self.cb.on_run_end(MagicMock(), long_result)
-        output = self.mock_trace.update.call_args[1]['output']
+        self.cb._trace = self.mock_trace_span
+        self.cb.on_run_end(MagicMock(), "x" * 3000)
+        output = self.mock_trace_span.update.call_args[1]['output']
         assert len(output) == 2000
 
     def test_on_run_end_handles_none_result(self):
-        self.cb._trace = self.mock_trace
+        self.cb._trace = self.mock_trace_span
         self.cb.on_run_end(MagicMock(), None)
-        self.mock_trace.update.assert_called_once_with(output=None)
+        self.mock_trace_span.update.assert_called_once_with(output=None)
 
     def test_on_run_end_handles_flush_error(self):
-        self.cb._trace = self.mock_trace
+        self.cb._trace = self.mock_trace_span
         self.mock_langfuse.flush.side_effect = Exception("network error")
         self.cb.on_run_end(MagicMock(), "result")  # should not raise
 
     def test_on_converse_start_creates_generation(self):
-        self.cb._trace = self.mock_trace
+        self.cb._trace = self.mock_trace_span
         converse = MagicMock()
         converse.model_id = "kimi-k2.5"
         self.cb.on_converse_start(converse)
-        self.mock_trace.generation.assert_called_once()
+        self.mock_trace_span.start_generation.assert_called_once_with(name="llm", model="kimi-k2.5")
         assert self.cb._generation is self.mock_generation
         assert self.cb._generation_start is not None
 
@@ -125,8 +121,8 @@ class TestLangfuseEnabled:
         self.cb.on_converse_start(MagicMock())
         assert self.cb._generation is None
 
-    def test_on_converse_end_ends_generation(self):
-        self.cb._trace = self.mock_trace
+    def test_on_converse_end_updates_and_ends_generation(self):
+        self.cb._trace = self.mock_trace_span
         self.cb._generation = self.mock_generation
         self.cb._generation_start = time.time()
 
@@ -139,16 +135,18 @@ class TestLangfuseEnabled:
         response.stop_reason = "end_turn"
 
         self.cb.on_converse_end(response)
-        self.mock_generation.end.assert_called_once()
-        call_kwargs = self.mock_generation.end.call_args[1]
-        assert call_kwargs['usage']['input'] == 100
-        assert call_kwargs['usage']['output'] == 50
-        assert call_kwargs['usage']['input_cached'] == 20
+        self.mock_generation.update.assert_called_once()
+        call_kwargs = self.mock_generation.update.call_args[1]
+        assert call_kwargs['usage_details']['input'] == 100
+        assert call_kwargs['usage_details']['output'] == 50
+        assert call_kwargs['usage_details']['cache_read'] == 20
+        assert call_kwargs['cost_details']['total_usd'] == 0.001
         assert call_kwargs['metadata']['stop_reason'] == "end_turn"
+        self.mock_generation.end.assert_called_once()
         assert self.cb._generation is None
 
     def test_on_converse_end_without_cache(self):
-        self.cb._trace = self.mock_trace
+        self.cb._trace = self.mock_trace_span
         self.cb._generation = self.mock_generation
         self.cb._generation_start = time.time()
 
@@ -161,11 +159,11 @@ class TestLangfuseEnabled:
         response.stop_reason = "end_turn"
 
         self.cb.on_converse_end(response)
-        call_kwargs = self.mock_generation.end.call_args[1]
-        assert 'input_cached' not in call_kwargs['usage']
+        call_kwargs = self.mock_generation.update.call_args[1]
+        assert 'cache_read' not in call_kwargs['usage_details']
 
     def test_on_converse_end_without_cost(self):
-        self.cb._trace = self.mock_trace
+        self.cb._trace = self.mock_trace_span
         self.cb._generation = self.mock_generation
         self.cb._generation_start = time.time()
 
@@ -178,23 +176,24 @@ class TestLangfuseEnabled:
         response.stop_reason = "end_turn"
 
         self.cb.on_converse_end(response)
-        call_kwargs = self.mock_generation.end.call_args[1]
-        assert call_kwargs['metadata']['cost_usd'] is None
+        call_kwargs = self.mock_generation.update.call_args[1]
+        assert call_kwargs['cost_details'] is None
 
-    def test_on_tool_start_creates_span(self):
-        self.cb._trace = self.mock_trace
+    def test_on_tool_start_creates_child_span(self):
+        self.cb._trace = self.mock_trace_span
         self.cb.on_tool_start("create_state", {"content": "test"}, "tool-123")
-        self.mock_trace.span.assert_called_once_with(
+        self.mock_trace_span.start_span.assert_called_once_with(
             name="create_state", input={"content": "test"}, metadata={"tool_use_id": "tool-123"}
         )
         assert "tool-123" in self.cb._tool_spans
 
-    def test_on_tool_end_ends_span(self):
-        self.cb._trace = self.mock_trace
-        self.cb._tool_spans["tool-123"] = (self.mock_span, time.time())
+    def test_on_tool_end_updates_and_ends_span(self):
+        self.cb._trace = self.mock_trace_span
+        self.cb._tool_spans["tool-123"] = self.mock_tool_span
         self.cb.on_tool_end("create_state", {"content": "test"}, "tool-123", "ok", "success", 0.05)
-        self.mock_span.end.assert_called_once()
-        call_kwargs = self.mock_span.end.call_args[1]
+        self.mock_tool_span.update.assert_called_once()
+        self.mock_tool_span.end.assert_called_once()
+        call_kwargs = self.mock_tool_span.update.call_args[1]
         assert call_kwargs['output'] == "ok"
         assert call_kwargs['metadata']['status'] == "success"
         assert "tool-123" not in self.cb._tool_spans
@@ -203,14 +202,14 @@ class TestLangfuseEnabled:
         self.cb.on_tool_end("create_state", {}, "nonexistent", "ok", "success", 0.1)
 
     def test_on_tool_end_truncates_long_result(self):
-        self.cb._trace = self.mock_trace
-        self.cb._tool_spans["t1"] = (self.mock_span, time.time())
+        self.cb._trace = self.mock_trace_span
+        self.cb._tool_spans["t1"] = self.mock_tool_span
         self.cb.on_tool_end("tool", {}, "t1", "x" * 3000, "success", 0.1)
-        output = self.mock_span.end.call_args[1]['output']
+        output = self.mock_tool_span.update.call_args[1]['output']
         assert len(output) == 2000
 
     def test_full_lifecycle(self):
-        """Simulates a complete agent run with LLM call + tool."""
+        """Simulates a complete agent run: start → LLM → tool → LLM → end."""
         agent = MagicMock()
         agent.model_id = "test-model"
 
@@ -222,29 +221,24 @@ class TestLangfuseEnabled:
         response.metrics.latency_ms = 800
         response.stop_reason = "tool_use"
 
-        # Run start
         self.cb.on_run_start(agent)
         assert self.cb._trace is not None
 
-        # LLM call
         self.cb.on_converse_start(agent)
         self.cb.on_converse_end(response)
 
-        # Tool execution
         self.cb.on_tool_start("send_message", {"text": "hi"}, "t1")
         self.cb.on_tool_end("send_message", {"text": "hi"}, "t1", "sent", "success", 0.02)
 
-        # Second LLM call
         response.stop_reason = "end_turn"
         self.cb.on_converse_start(agent)
         self.cb.on_converse_end(response)
 
-        # Run end
         self.cb.on_run_end(agent, "Done")
 
-        assert self.mock_langfuse.trace.call_count == 1
-        assert self.mock_trace.generation.call_count == 2
-        assert self.mock_trace.span.call_count == 1
+        assert self.mock_langfuse.start_span.call_count == 1  # root span
+        assert self.mock_trace_span.start_generation.call_count == 2  # 2 LLM calls
+        assert self.mock_trace_span.start_span.call_count == 1  # 1 tool
         self.mock_langfuse.flush.assert_called_once()
 
 
@@ -252,14 +246,11 @@ class TestLangfuseEnabled:
 
 class TestBaseCallbackHooks:
     def test_new_hooks_have_default_implementations(self):
-        """on_tool_start, on_tool_end, on_run_start, on_run_end should be callable without override."""
-
         class MinimalCallback(BaseCallbackHandler):
             def on_converse_start(self, converse): pass
             def on_converse_end(self, response): pass
 
         cb = MinimalCallback()
-        # These should not raise
         cb.on_tool_start("tool", {}, "id")
         cb.on_tool_end("tool", {}, "id", "result", "success", 0.1)
         cb.on_run_start(MagicMock())
@@ -269,11 +260,8 @@ class TestBaseCallbackHooks:
 # --- Test agent run() fires lifecycle hooks ---
 
 class TestAgentRunHooks:
-    """Test that ConverseAgent.run() fires the new callback hooks."""
-
     def test_run_fires_on_run_start_and_end(self):
-        """Verify on_run_start and on_run_end are called during agent.run()."""
-        from bedrock.converse import ConverseAgent, Message, MessageContent, ConverseResponse
+        from bedrock.converse import ConverseAgent
 
         mock_cb = MagicMock(spec=BaseCallbackHandler)
         mock_cb.on_run_start = MagicMock()
@@ -286,14 +274,10 @@ class TestAgentRunHooks:
         agent = ConverseAgent(model_id="test", region_name="us-east-1")
         agent.callbacks.append(mock_cb)
 
-        # Mock _get_response to return a text-only response
         mock_response = MagicMock()
-        mock_message = MagicMock()
         text_content = MagicMock()
         text_content.text = "Hello"
         text_content.tool_use = None
-        mock_message.content = [text_content]
-        mock_response.output.message = mock_message
         mock_response.output.message.content = [text_content]
         agent._get_response = MagicMock(return_value=mock_response)
 
