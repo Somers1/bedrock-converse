@@ -876,7 +876,7 @@ class Converse(ToDictMixin, FromDictMixin):
 
     @property
     def current_tool_names(self):
-        return [tool.tool_spec.name for tool in self.tool_config.tools]
+        return [tool.tool_spec.name for tool in self.tool_config.tools if tool.tool_spec is not None]
 
     def add_tool(self, tool):
         if self.tool_config is None:
