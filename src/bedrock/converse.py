@@ -809,7 +809,16 @@ class Converse(ToDictMixin, FromDictMixin):
         payload = self.to_dict()
         if messages:
             payload['messages'] = [m.to_dict() for m in messages]
-        response = ConverseResponse.from_dict(self.client.converse(**payload))
+        try:
+            response = ConverseResponse.from_dict(self.client.converse(**payload))
+        except Exception as error:
+            for callback in self.callbacks:
+                try:
+                    if hasattr(callback, 'on_converse_error'):
+                        callback.on_converse_error(self, error)
+                except Exception as callback_error:
+                    logger.warning(f"Callback error: {callback_error}")
+            raise
         response.model_id = self.model_id
         for callback in self.callbacks:
             try: callback.on_converse_end(response)
@@ -838,7 +847,16 @@ class Converse(ToDictMixin, FromDictMixin):
         payload = self.to_dict()
         if messages:
             payload['messages'] = [m.to_dict() for m in messages]
-        response_dict = await loop.run_in_executor(None, lambda: self.client.converse(**payload))
+        try:
+            response_dict = await loop.run_in_executor(None, lambda: self.client.converse(**payload))
+        except Exception as error:
+            for callback in self.callbacks:
+                try:
+                    if hasattr(callback, 'on_converse_error'):
+                        callback.on_converse_error(self, error)
+                except Exception as callback_error:
+                    logger.warning(f"Callback error: {callback_error}")
+            raise
         response = ConverseResponse.from_dict(response_dict)
         response.model_id = self.model_id
         for callback in self.callbacks:

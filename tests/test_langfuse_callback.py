@@ -107,10 +107,12 @@ class TestLangfuseEnabled:
 
     def test_on_run_start_creates_agent_observation_and_trace_attrs(self):
         long_text = "x" * 10000
+        system_text = "You are a precise assistant."
         agent = SimpleNamespace(
             model_id="test-model",
             max_iterations=5,
             messages=[_mk_message(role="user", content=[_mk_content(text=long_text)])],
+            system=[SimpleNamespace(text=system_text, guard_content=None, cache_point=None)],
         )
 
         self.cb.on_run_start(agent)
@@ -122,6 +124,7 @@ class TestLangfuseEnabled:
 
         messages = call_kwargs["input"]["messages"]["messages"]
         assert messages[0]["content"][0]["text"] == long_text
+        assert call_kwargs["input"]["system"]["prompts"][0]["text"] == system_text
 
         self.mock_trace.update_trace.assert_called_once()
         self.mock_langfuse.propagate_attributes.assert_called_once()
@@ -129,12 +132,14 @@ class TestLangfuseEnabled:
 
     def test_on_converse_start_and_end_capture_full_generation_payload(self):
         self.cb._trace = self.mock_trace
+        self.cb._trace_started_by_run = True
 
         user_text = "u" * 8000
+        system_text = "System prompt with full text visibility."
         converse = SimpleNamespace(
             model_id="kimi-k2.5",
             messages=[_mk_message(role="user", content=[_mk_content(text=user_text)])],
-            system=[],
+            system=[SimpleNamespace(text=system_text, guard_content=None, cache_point=None)],
             inference_config=SimpleNamespace(max_tokens=123, temperature=0.2, top_p=0.9, stop_sequences=["stop"]),
             request_metadata={"request_id": "abc"},
             performance_config=SimpleNamespace(latency="standard"),
@@ -146,6 +151,7 @@ class TestLangfuseEnabled:
         start_kwargs = self.mock_trace.start_observation.call_args.kwargs
         assert start_kwargs["as_type"] == "generation"
         assert start_kwargs["input"]["messages"]["messages"][0]["content"][0]["text"] == user_text
+        assert start_kwargs["input"]["system"]["prompts"][0]["text"] == system_text
 
         assistant_text = "a" * 9000
         response = SimpleNamespace(
@@ -183,12 +189,14 @@ class TestLangfuseEnabled:
         assert update_kwargs["usage_details"]["cache_read_input_tokens"] == 20
         assert update_kwargs["usage_details"]["cache_write_input_tokens"] == 10
         assert update_kwargs["cost_details"]["total_usd"] == 0.0033
+        assert update_kwargs["cost_details"]["usd"] == 0.0033
 
         self.mock_generation.end.assert_called_once()
         assert self.cb._generation is None
 
     def test_tool_tracing_captures_full_input_and_output(self):
         self.cb._trace = self.mock_trace
+        self.cb._trace_started_by_run = True
 
         tool_input = {"text": "hello" * 1000}
         tool_output = {"result": "ok" * 1000}
@@ -219,11 +227,91 @@ class TestLangfuseEnabled:
         trace_update_calls = self.mock_trace.update.call_args_list
         assert trace_update_calls
         final_update_kwargs = trace_update_calls[-1].kwargs
-        assert final_update_kwargs["output"] == result_text
+        assert final_update_kwargs["output"]["result"] == result_text
 
         self.mock_trace.end.assert_called_once()
         self.mock_langfuse.flush.assert_called_once()
         self.mock_scope.__exit__.assert_called_once()
+
+    def test_standalone_converse_creates_and_closes_root_trace(self):
+        user_text = "hello"
+        converse = SimpleNamespace(
+            model_id="test-model",
+            messages=[_mk_message(role="user", content=[_mk_content(text=user_text)])],
+            system=[SimpleNamespace(text="sys", guard_content=None, cache_point=None)],
+            inference_config=None,
+            request_metadata=None,
+            performance_config=None,
+            tool_config=None,
+            guardrail_config=None,
+            additional_model_request_fields=None,
+            prompt_variables=None,
+            additional_model_response_field_paths=None,
+            region_name=None,
+            max_iterations=None,
+        )
+
+        response = SimpleNamespace(
+            output=SimpleNamespace(message=_mk_message(role="assistant", content=[_mk_content(text="done")])),
+            usage=SimpleNamespace(
+                input_tokens=10,
+                output_tokens=3,
+                total_tokens=13,
+                cache_read_input_tokens=0,
+                cache_write_input_tokens=0,
+            ),
+            cost=SimpleNamespace(
+                input_cost=0.001,
+                output_cost=0.002,
+                cached_read_cost=0.0,
+                cached_write_cost=0.0,
+                total_cost=0.003,
+            ),
+            metrics=SimpleNamespace(latency_ms=123),
+            stop_reason="end_turn",
+            model_id="test-model",
+            response_metadata={},
+            additional_model_response_fields=None,
+            trace=None,
+            performance_config=None,
+        )
+
+        self.cb.on_converse_start(converse)
+        assert self.mock_langfuse.start_observation.call_count == 1
+        assert self.mock_trace.start_observation.call_count == 1
+        self.cb.on_converse_end(response)
+
+        # Standalone converse should close the root trace immediately.
+        self.mock_trace.end.assert_called()
+        self.mock_langfuse.flush.assert_called()
+
+    def test_on_converse_error_closes_generation_and_trace(self):
+        self.cb._trace = self.mock_trace
+        self.cb._generation = self.mock_generation
+        self.cb._trace_started_by_run = True
+
+        converse = SimpleNamespace(
+            model_id="test-model",
+            messages=[_mk_message(role="user", content=[_mk_content(text="hi")])],
+            system=[SimpleNamespace(text="sys", guard_content=None, cache_point=None)],
+            inference_config=None,
+            tool_config=None,
+            guardrail_config=None,
+            additional_model_request_fields=None,
+            prompt_variables=None,
+            additional_model_response_field_paths=None,
+            request_metadata=None,
+            performance_config=None,
+            region_name=None,
+        )
+
+        self.cb.on_converse_error(converse, RuntimeError("provider timeout"))
+
+        self.mock_generation.update.assert_called_once()
+        self.mock_generation.end.assert_called_once()
+        self.mock_trace.update.assert_called()
+        self.mock_trace.end.assert_called()
+        self.mock_langfuse.flush.assert_called()
 
     def test_fallback_to_start_generation_when_start_observation_missing(self):
         owner = SimpleNamespace(

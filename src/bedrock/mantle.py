@@ -183,7 +183,16 @@ class _MantleTransport:
             except Exception as e: logger.warning(f"Callback error: {e}")
         params = self._build_params(messages)
         start = time.time()
-        completion = self.openai_client.chat.completions.create(**params)
+        try:
+            completion = self.openai_client.chat.completions.create(**params)
+        except Exception as error:
+            for callback in self.callbacks:
+                try:
+                    if hasattr(callback, 'on_converse_error'):
+                        callback.on_converse_error(self, error)
+                except Exception as callback_error:
+                    logger.warning(f"Callback error: {callback_error}")
+            raise
         response = self._parse_completion(completion, int((time.time() - start) * 1000))
         response.model_id = self.model_id
         for callback in self.callbacks:
@@ -197,7 +206,16 @@ class _MantleTransport:
             except Exception as e: logger.warning(f"Callback error: {e}")
         params = self._build_params(messages)
         start = time.time()
-        completion = await self.async_openai_client.chat.completions.create(**params)
+        try:
+            completion = await self.async_openai_client.chat.completions.create(**params)
+        except Exception as error:
+            for callback in self.callbacks:
+                try:
+                    if hasattr(callback, 'on_converse_error'):
+                        callback.on_converse_error(self, error)
+                except Exception as callback_error:
+                    logger.warning(f"Callback error: {callback_error}")
+            raise
         response = self._parse_completion(completion, int((time.time() - start) * 1000))
         response.model_id = self.model_id
         for callback in self.callbacks:

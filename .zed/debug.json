@@ -1,0 +1,9 @@
+[
+  {
+    "adapter": "Debugpy",
+    "label": "[Zed Auto][Python][Debug] tests/test_langfuse_callback.py",
+    "request": "launch",
+    "program": "$ZED_WORKTREE_ROOT/tests/test_langfuse_callback.py",
+    "cwd": "$ZED_WORKTREE_ROOT"
+  }
+]

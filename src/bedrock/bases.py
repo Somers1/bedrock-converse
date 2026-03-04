@@ -21,3 +21,6 @@ class BaseCallbackHandler(ABC):
 
     def on_run_end(self, agent, result):
         """ Callback at the end of agent.run(). """
+
+    def on_converse_error(self, converse, error: Exception):
+        """ Callback when conversation call fails before a response is returned. """

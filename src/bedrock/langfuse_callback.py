@@ -93,6 +93,7 @@ class LangfuseCallback(BaseCallbackHandler):
         self._generation_completion_start_time = None
         self._tool_spans = {}
         self._trace_attribute_scope = None
+        self._trace_started_by_run = False
 
     @property
     def enabled(self):
@@ -257,6 +258,56 @@ class LangfuseCallback(BaseCallbackHandler):
             "messages": serialized,
         }
 
+    @classmethod
+    def _summarize_system_prompts(cls, system_prompts: List[Any]) -> Dict[str, Any]:
+        count = len(system_prompts)
+        serialized = []
+
+        for item in _take(system_prompts, _MAX_ITEMS):
+            entry: Dict[str, Any] = {}
+
+            text = getattr(item, "text", None)
+            if text is not None:
+                entry["text"] = _truncate_text(text, None)
+
+            guard_content = getattr(item, "guard_content", None)
+            if guard_content is not None:
+                if hasattr(guard_content, "to_dict") and callable(guard_content.to_dict):
+                    entry["guard_content"] = cls._to_primitive(guard_content.to_dict())
+                else:
+                    entry["guard_content"] = cls._to_primitive(guard_content)
+
+            cache_point = getattr(item, "cache_point", None)
+            if cache_point is not None:
+                if hasattr(cache_point, "to_dict") and callable(cache_point.to_dict):
+                    entry["cache_point"] = cls._to_primitive(cache_point.to_dict())
+                else:
+                    entry["cache_point"] = cls._to_primitive(cache_point)
+
+            if not entry:
+                if hasattr(item, "to_dict") and callable(item.to_dict):
+                    entry = cls._to_primitive(item.to_dict())
+                else:
+                    entry = {"value": cls._to_primitive(item)}
+
+            serialized.append(entry)
+
+        return {
+            "count": count,
+            "truncated": False if _MAX_ITEMS is None else count > _MAX_ITEMS,
+            "prompts": serialized,
+        }
+
+    @classmethod
+    def _serialize_obj(cls, value: Any):
+        if value is None:
+            return None
+        if hasattr(value, "to_dict") and callable(value.to_dict):
+            return cls._to_primitive(value.to_dict())
+        if hasattr(value, "model_dump") and callable(value.model_dump):
+            return cls._to_primitive(value.model_dump())
+        return cls._to_primitive(value)
+
     @staticmethod
     def _build_trace_attribute_metadata(metadata: Dict[str, Any]) -> Dict[str, str]:
         result: Dict[str, str] = {}
@@ -274,8 +325,10 @@ class LangfuseCallback(BaseCallbackHandler):
 
     def _build_run_input(self, agent: Any) -> Dict[str, Any]:
         messages = getattr(agent, "messages", None) or []
+        system_prompts = getattr(agent, "system", None) or []
         return {
             "messages": self._summarize_messages(messages),
+            "system": self._summarize_system_prompts(system_prompts),
         }
 
     def _build_run_metadata(self, agent: Any) -> Dict[str, Any]:
@@ -292,9 +345,24 @@ class LangfuseCallback(BaseCallbackHandler):
 
     def _build_generation_input(self, converse: Any) -> Dict[str, Any]:
         messages = getattr(converse, "messages", None) or []
+        system_prompts = getattr(converse, "system", None) or []
         input_payload = {
+            "model_id": getattr(converse, "model_id", None),
             "messages": self._summarize_messages(messages),
-            "system_prompt_count": len(getattr(converse, "system", None) or []),
+            "system": self._summarize_system_prompts(system_prompts),
+            "system_prompt_count": len(system_prompts),
+            "tool_config": self._serialize_obj(getattr(converse, "tool_config", None)),
+            "guardrail_config": self._serialize_obj(getattr(converse, "guardrail_config", None)),
+            "additional_model_request_fields": self._serialize_obj(
+                getattr(converse, "additional_model_request_fields", None)
+            ),
+            "prompt_variables": self._serialize_obj(getattr(converse, "prompt_variables", None)),
+            "additional_model_response_field_paths": self._to_primitive(
+                getattr(converse, "additional_model_response_field_paths", None)
+            ),
+            "request_metadata": self._to_primitive(getattr(converse, "request_metadata", None)),
+            "performance_config": self._serialize_obj(getattr(converse, "performance_config", None)),
+            "region_name": getattr(converse, "region_name", None),
         }
 
         inference_config = getattr(converse, "inference_config", None)
@@ -330,23 +398,44 @@ class LangfuseCallback(BaseCallbackHandler):
             "request_metadata": self._to_primitive(getattr(converse, "request_metadata", None)),
             "performance_config": self._to_primitive(getattr(converse, "performance_config", None)),
             "tool_count": len(getattr(getattr(converse, "tool_config", None), "tools", None) or []),
+            "region_name": getattr(converse, "region_name", None),
         }
         return {k: v for k, v in metadata.items() if v is not None}
 
     def _build_generation_output(self, response: Any) -> Dict[str, Any]:
+        usage = getattr(response, "usage", None)
+        metrics = getattr(response, "metrics", None)
         output = {
+            "model_id": getattr(response, "model_id", None),
+            "stop_reason": getattr(response, "stop_reason", None),
             "message": {
                 "role": getattr(getattr(response, "output", None), "message", None)
                 and getattr(response.output.message, "role", None),
                 "content": [],
+            },
+            "usage": {
+                "input_tokens": getattr(usage, "input_tokens", None),
+                "output_tokens": getattr(usage, "output_tokens", None),
+                "total_tokens": getattr(usage, "total_tokens", None),
+                "cache_read_input_tokens": getattr(usage, "cache_read_input_tokens", None),
+                "cache_write_input_tokens": getattr(usage, "cache_write_input_tokens", None),
             }
+            if usage is not None
+            else None,
+            "metrics": {"latency_ms": getattr(metrics, "latency_ms", None)} if metrics is not None else None,
+            "additional_model_response_fields": self._to_primitive(
+                getattr(response, "additional_model_response_fields", None)
+            ),
+            "trace": self._serialize_obj(getattr(response, "trace", None)),
+            "performance_config": self._serialize_obj(getattr(response, "performance_config", None)),
+            "response_metadata": self._to_primitive(getattr(response, "response_metadata", None)),
         }
 
         message = getattr(getattr(response, "output", None), "message", None)
         for content in _take(getattr(message, "content", []), _MAX_ITEMS):
             output["message"]["content"].append(self._summarize_message_content(content))
 
-        return output
+        return {k: v for k, v in output.items() if v is not None}
 
     @staticmethod
     def _build_usage_details(response: Any) -> Optional[Dict[str, int]]:
@@ -418,6 +507,8 @@ class LangfuseCallback(BaseCallbackHandler):
                     details["total_usd"] = round(float(total), 8)
                 except (TypeError, ValueError):
                     pass
+        if "total_usd" in details:
+            details["usd"] = details["total_usd"]
 
         return details or None
 
@@ -558,6 +649,7 @@ class LangfuseCallback(BaseCallbackHandler):
             return
 
         self._close_trace_attribute_propagation()
+        self._trace_started_by_run = True
 
         run_input = self._build_run_input(agent)
         run_metadata = self._build_run_metadata(agent)
@@ -596,13 +688,19 @@ class LangfuseCallback(BaseCallbackHandler):
 
         if not self._trace:
             self._close_trace_attribute_propagation()
+            self._trace_started_by_run = False
             return
 
         self._finalize_dangling_observations()
+        run_output = {
+            "result": self._to_primitive(result),
+            "messages": self._summarize_messages(getattr(agent, "messages", None) or []),
+            "system": self._summarize_system_prompts(getattr(agent, "system", None) or []),
+        }
 
         self._update_observation(
             self._trace,
-            output=self._to_primitive(result),
+            output=run_output,
             metadata={"result_type": type(result).__name__ if result is not None else None},
         )
         self._safe_end(self._trace)
@@ -618,11 +716,41 @@ class LangfuseCallback(BaseCallbackHandler):
             self._generation_start_time = None
             self._generation_completion_start_time = None
             self._tool_spans.clear()
+            self._trace_started_by_run = False
 
     # --- LLM call lifecycle ---
 
     def on_converse_start(self, converse):
-        if not self.enabled or not self._trace:
+        if not self.enabled:
+            return
+
+        if not self._trace:
+            self._close_trace_attribute_propagation()
+            self._trace_started_by_run = False
+            run_metadata = self._build_run_metadata(converse)
+            self._start_trace_attribute_propagation(run_metadata)
+            self._trace = self._start_observation(
+                self._langfuse,
+                name="converse.run",
+                as_type="chain",
+                input=self._build_generation_input(converse),
+                metadata=run_metadata,
+            )
+            if self._trace and hasattr(self._trace, "update_trace"):
+                trace_kwargs: Dict[str, Any] = {
+                    "user_id": self.user_id,
+                    "session_id": self.session_id,
+                    "tags": self.tags or None,
+                }
+                trace_metadata = self._build_trace_attribute_metadata(run_metadata)
+                if trace_metadata:
+                    trace_kwargs["metadata"] = trace_metadata
+                try:
+                    _safe_call_with_supported_kwargs(self._trace.update_trace, **trace_kwargs)
+                except Exception as exc:
+                    logger.warning("Langfuse trace attribute update failed: %s", exc)
+
+        if not self._trace:
             return
 
         self._generation_start_time = time.time()
@@ -673,6 +801,64 @@ class LangfuseCallback(BaseCallbackHandler):
         self._generation = None
         self._generation_start_time = None
         self._generation_completion_start_time = None
+
+        if self._trace and not self._trace_started_by_run:
+            self._update_observation(
+                self._trace,
+                output={"response": self._build_generation_output(response)},
+            )
+            self._safe_end(self._trace)
+            try:
+                self._langfuse.flush()
+            except Exception as exc:
+                logger.warning("Langfuse flush failed: %s", exc)
+            finally:
+                self._close_trace_attribute_propagation()
+                self._trace = None
+
+    def on_converse_error(self, converse, error: Exception):
+        if not self.enabled:
+            return
+
+        error_text = _truncate_text(error, None)
+        short_error_text = _truncate_text(error, 600)
+        error_type = type(error).__name__
+
+        if self._generation is not None:
+            self._update_observation(
+                self._generation,
+                level="ERROR",
+                status_message=short_error_text,
+                metadata={"error_type": error_type, "error": error_text},
+            )
+            self._safe_end(self._generation)
+            self._generation = None
+            self._generation_start_time = None
+            self._generation_completion_start_time = None
+
+        if self._trace is not None:
+            self._update_observation(
+                self._trace,
+                output={
+                    "error": error_text,
+                    "error_type": error_type,
+                    "failed_request": self._build_generation_input(converse),
+                },
+                level="ERROR",
+                status_message=short_error_text,
+                metadata={"error_type": error_type},
+            )
+            self._safe_end(self._trace)
+
+            try:
+                self._langfuse.flush()
+            except Exception as flush_exc:
+                logger.warning("Langfuse flush failed: %s", flush_exc)
+            finally:
+                self._close_trace_attribute_propagation()
+                self._trace = None
+                self._tool_spans.clear()
+                self._trace_started_by_run = False
 
     # --- Tool lifecycle ---
 
