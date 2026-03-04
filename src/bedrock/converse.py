@@ -1249,6 +1249,12 @@ class ConverseAgent(Converse):
         self.structured_output = None
         self._list_wrapped = False
 
+    def _fire_run_end(self, result):
+        for cb in self.callbacks:
+            if hasattr(cb, 'on_run_end'):
+                cb.on_run_end(self, result)
+        return result
+
     def run(self, message: Message | str = None, max_iterations=None, first_tool_only=True):
         max_iterations = max_iterations or self.max_iterations
 
@@ -1261,12 +1267,15 @@ class ConverseAgent(Converse):
             message = Message().add_text(message)
         if message:
             self.messages.append(message)
+        for cb in self.callbacks:
+            if hasattr(cb, 'on_run_start'):
+                cb.on_run_start(self)
         for iteration in range(max_iterations):
             response = self._get_response()
             if not response.output.message.content:
                 last_content_text = self.messages[-1].content[-1].text
                 logger.error(last_content_text)
-                return last_content_text
+                return self._fire_run_end(last_content_text)
             self.messages.append(response.output.message)
             tool_results = []
             exit_tool_results = []
@@ -1277,6 +1286,10 @@ class ConverseAgent(Converse):
                     tool_use_id = content.tool_use.tool_use_id
                     if self.debug:
                         logger.warning(f'Called {tool_name} for {tool_input}')
+                    for cb in self.callbacks:
+                        if hasattr(cb, 'on_tool_start'):
+                            cb.on_tool_start(tool_name, tool_input, tool_use_id)
+                    _tool_start = time.time()
                     try:
                         if self.exit_tool and tool_name == self.exit_tool.tool_spec.name:
                             if self.structured_output:
@@ -1293,6 +1306,9 @@ class ConverseAgent(Converse):
                             content=[ToolResultContent(text=str(result))],
                             status="success"
                         )
+                        for cb in self.callbacks:
+                            if hasattr(cb, 'on_tool_end'):
+                                cb.on_tool_end(tool_name, tool_input, tool_use_id, result, "success", time.time() - _tool_start)
                     except Exception as e:
                         logger.error(f'Failed to call tool {e}', exc_info=True)
                         tool_result = ToolResult(
@@ -1300,6 +1316,9 @@ class ConverseAgent(Converse):
                             content=[ToolResultContent(text=str(e))],
                             status="error"
                         )
+                        for cb in self.callbacks:
+                            if hasattr(cb, 'on_tool_end'):
+                                cb.on_tool_end(tool_name, tool_input, tool_use_id, str(e), "error", time.time() - _tool_start)
                     tool_results.append(tool_result)
             # If no tools were called, fire on_text or return the text directly
             # This prevents the loop from continuing with an assistant message at the end,
@@ -1309,8 +1328,8 @@ class ConverseAgent(Converse):
                 if text_parts and self._on_text:
                     on_text_result = self._on_text('\n'.join(text_parts))
                     if on_text_result is not None:
-                        return on_text_result
-                return '\n'.join(text_parts) if text_parts else None
+                        return self._fire_run_end(on_text_result)
+                return self._fire_run_end('\n'.join(text_parts) if text_parts else None)
             if tool_results:
                 tool_message = Message(role="user")
                 for result in tool_results:
@@ -1319,12 +1338,10 @@ class ConverseAgent(Converse):
             if exit_tool_results:
                 if first_tool_only:
                     result = exit_tool_results[0]
-                    # Unwrap list results if we wrapped a List type
                     if self._list_wrapped and hasattr(result, 'items'):
-                        return result.items
-                    return result
-                # Unwrap each result if we wrapped a List type
+                        return self._fire_run_end(result.items)
+                    return self._fire_run_end(result)
                 if self._list_wrapped:
-                    return [r.items if hasattr(r, 'items') else r for r in exit_tool_results]
-                return exit_tool_results
-        return f"Agent reached maximum iterations ({max_iterations}) without calling exit tool"
+                    return self._fire_run_end([r.items if hasattr(r, 'items') else r for r in exit_tool_results])
+                return self._fire_run_end(exit_tool_results)
+        return self._fire_run_end(f"Agent reached maximum iterations ({max_iterations}) without calling exit tool")
