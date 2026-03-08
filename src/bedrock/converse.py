@@ -1215,8 +1215,15 @@ class ConverseAgent(Converse):
     _list_wrapped: bool = False  # Track if we wrapped a List type
     _on_text: Optional[callable] = None
 
+    # Suppress text content when the model responds with both text and tool calls in the same turn.
+    # Prevents a class of hallucination where the model writes conversational text (questions, recaps)
+    # alongside tool calls, then in the next iteration pattern-completes a fake user response to its
+    # own text. With this enabled, text is stripped from mixed text+tool responses — the model can
+    # only communicate via tools during the loop. Text-only responses still work as the exit signal.
+    suppress_text_during_loop: bool = True
+
     def __post_init__(self):
-        super()._TO_DICT_EXCLUSIONS.extend(['max_iterations', 'exit_tool', 'structured_output', 'debug', '_list_wrapped', '_on_text'])
+        super()._TO_DICT_EXCLUSIONS.extend(['max_iterations', 'exit_tool', 'structured_output', 'debug', '_list_wrapped', '_on_text', 'suppress_text_during_loop'])
 
     def on_text(self, hook: callable):
         """Register a hook called when the agent responds with text instead of tools.
@@ -1294,6 +1301,10 @@ class ConverseAgent(Converse):
                 last_content_text = self.messages[-1].content[-1].text
                 logger.error(last_content_text)
                 return self._fire_run_end(last_content_text)
+            # Strip text from mixed text+tool responses to prevent hallucinated user replies
+            has_tools = any(c.tool_use for c in response.output.message.content)
+            if self.suppress_text_during_loop and has_tools:
+                response.output.message.content = [c for c in response.output.message.content if not c.text or c.tool_use]
             self.messages.append(response.output.message)
             tool_results = []
             exit_tool_results = []
