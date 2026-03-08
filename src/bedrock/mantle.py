@@ -1,6 +1,7 @@
 import base64
 import json
 import logging
+import os
 import time
 from dataclasses import dataclass
 from functools import cached_property
@@ -22,12 +23,16 @@ class _MantleTransport:
 
     @property
     def _mantle_base_url(self):
+        if endpoint := os.environ.get('MANTLE_ENDPOINT'):
+            return endpoint
         region = self.region_name or self.session.region_name
         return f'https://bedrock-mantle.{region}.api.aws/v1'
 
     def _get_client(self, openai_class):
         if self.api_key:
             return openai_class(api_key=self.api_key, base_url=self._mantle_base_url)
+        if api_key := os.environ.get('MANTLE_API_KEY'):
+            return openai_class(api_key=api_key, base_url=self._mantle_base_url)
         return openai_class(base_url=self._mantle_base_url)
 
     @cached_property
