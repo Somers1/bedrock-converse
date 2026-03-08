@@ -1240,10 +1240,21 @@ class ConverseAgent(Converse):
                 if ct.tool_spec.name.endswith(f'_{tool}') or ct.tool_spec.name == tool:
                     logger.info(f'Found and bound tool {ct.tool_spec.name} as agent exit tool.')
                     self.exit_tool = ct
+                    self._annotate_exit_tool()
                     return self
             raise ValueError(f"No bound tool matching '{tool}' found in current tools")
         self.exit_tool = self.add_tool(tool)
+        self._annotate_exit_tool()
         return self
+
+    def _annotate_exit_tool(self):
+        """Append exit tool hint to the tool's description so the agent knows calling it ends the loop."""
+        if not self.exit_tool:
+            return
+        spec = self.exit_tool.tool_spec
+        hint = " [EXIT TOOL: Calling this tool ends the current agent loop. Complete all other work before calling it.]"
+        if hint not in spec.description:
+            spec.description += hint
 
     def with_structured_output(self, base_model, **kwargs):
         from typing import get_origin, get_args
