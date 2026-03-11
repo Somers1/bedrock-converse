@@ -1376,12 +1376,17 @@ class ConverseAgent(Converse):
                     tool_message.content.append(MessageContent(tool_result=result))
                 self.messages.append(tool_message)
             if exit_tool_results:
-                if first_tool_only:
-                    result = exit_tool_results[0]
-                    if self._list_wrapped and hasattr(result, 'items'):
-                        return self._fire_run_end(result.items)
-                    return self._fire_run_end(result)
-                if self._list_wrapped:
-                    return self._fire_run_end([r.items if hasattr(r, 'items') else r for r in exit_tool_results])
-                return self._fire_run_end(exit_tool_results)
+                # If any non-exit tool errored, loop back so the model sees the failure
+                has_errors = any(r.status == "error" for r in tool_results)
+                if not has_errors:
+                    if first_tool_only:
+                        result = exit_tool_results[0]
+                        if self._list_wrapped and hasattr(result, 'items'):
+                            return self._fire_run_end(result.items)
+                        return self._fire_run_end(result)
+                    if self._list_wrapped:
+                        return self._fire_run_end([r.items if hasattr(r, 'items') else r for r in exit_tool_results])
+                    return self._fire_run_end(exit_tool_results)
+                else:
+                    logger.warning("Exit tool called but other tools errored — looping back for retry")
         return self._fire_run_end(f"Agent reached maximum iterations ({max_iterations}) without calling exit tool")
