@@ -135,16 +135,26 @@ class ToolRegistry:
         return tool_name
 
     @staticmethod
-    def _to_snake_case_keys(obj):
-        """Recursively convert camelCase dict keys to snake_case."""
+    def _camel_to_snake(name):
+        """Convert a camelCase string to snake_case."""
         import re
-        def _camel_to_snake(name):
-            return re.sub(r'([a-z0-9])([A-Z])', r'\1_\2', name).lower()
-        if isinstance(obj, dict):
-            return {_camel_to_snake(k): ToolRegistry._to_snake_case_keys(v) for k, v in obj.items()}
-        if isinstance(obj, list):
-            return [ToolRegistry._to_snake_case_keys(item) for item in obj]
-        return obj
+        return re.sub(r'([a-z0-9])([A-Z])', r'\1_\2', name).lower()
+
+    @staticmethod
+    def _fix_camel_keys(arguments, known_params):
+        """Convert camelCase keys to snake_case, but ONLY when the key doesn't
+        match a known parameter and its snake_case version does."""
+        fixed = {}
+        for key, value in arguments.items():
+            if key in known_params:
+                fixed[key] = value
+            else:
+                snake = ToolRegistry._camel_to_snake(key)
+                if snake != key and snake in known_params:
+                    fixed[snake] = value
+                else:
+                    fixed[key] = value  # leave unknown keys as-is
+        return fixed
 
     def execute(self, tool_name: str, arguments: dict) -> Any:
         tool_name = self._resolve_tool_name(tool_name)
@@ -158,8 +168,14 @@ class ToolRegistry:
             type_hints = get_type_hints(func)
         except Exception:
             type_hints = {}
-        # Convert camelCase keys to snake_case (LLMs often output camelCase)
-        arguments = self._to_snake_case_keys(arguments)
+        # Get known parameter names from the function signature
+        import inspect
+        try:
+            known_params = set(inspect.signature(func).parameters.keys())
+        except (ValueError, TypeError):
+            known_params = set(type_hints.keys())
+        # Convert camelCase keys to snake_case only when unrecognised and snake version matches
+        arguments = self._fix_camel_keys(arguments, known_params)
         validated_args = {}
         for key, value in arguments.items():
             hint = type_hints.get(key)
