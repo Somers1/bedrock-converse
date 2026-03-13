@@ -134,6 +134,18 @@ class ToolRegistry:
             return matches[0]
         return tool_name
 
+    @staticmethod
+    def _to_snake_case_keys(obj):
+        """Recursively convert camelCase dict keys to snake_case."""
+        import re
+        def _camel_to_snake(name):
+            return re.sub(r'([a-z0-9])([A-Z])', r'\1_\2', name).lower()
+        if isinstance(obj, dict):
+            return {_camel_to_snake(k): ToolRegistry._to_snake_case_keys(v) for k, v in obj.items()}
+        if isinstance(obj, list):
+            return [ToolRegistry._to_snake_case_keys(item) for item in obj]
+        return obj
+
     def execute(self, tool_name: str, arguments: dict) -> Any:
         tool_name = self._resolve_tool_name(tool_name)
         if tool_name not in self.tools:
@@ -146,6 +158,8 @@ class ToolRegistry:
             type_hints = get_type_hints(func)
         except Exception:
             type_hints = {}
+        # Convert camelCase keys to snake_case (LLMs often output camelCase)
+        arguments = self._to_snake_case_keys(arguments)
         validated_args = {}
         for key, value in arguments.items():
             hint = type_hints.get(key)
