@@ -715,7 +715,8 @@ class ConverseCost:
 
     @property
     def input_cost(self):
-        return self.cost.input * self.usage.input_tokens / 1000
+        non_cached = self.usage.input_tokens - self.usage.cache_read_input_tokens - self.usage.cache_write_input_tokens
+        return self.cost.input * max(non_cached, 0) / 1000
 
     @property
     def output_cost(self):
