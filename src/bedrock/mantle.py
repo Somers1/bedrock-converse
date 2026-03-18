@@ -182,14 +182,90 @@ class _MantleTransport:
                              cache_read_input_tokens=cache_read),
             metrics=ConverseMetrics(latency_ms=latency_ms))
 
+    def _consume_stream(self, stream, start) -> ConverseResponse:
+        """Consume an OpenAI streaming response and assemble into ConverseResponse."""
+        text_parts = []
+        reasoning_parts = []
+        tool_calls = {}  # index -> {id, name, arguments}
+        finish_reason = None
+        usage = None
+
+        for chunk in stream:
+            if chunk.usage:
+                usage = chunk.usage
+            if not chunk.choices:
+                continue
+            delta = chunk.choices[0].delta
+            if chunk.choices[0].finish_reason:
+                finish_reason = chunk.choices[0].finish_reason
+
+            # Text content
+            if delta.content:
+                text_parts.append(delta.content)
+
+            # Reasoning (provider-specific)
+            reasoning = getattr(delta, 'reasoning', None) or getattr(delta, 'reasoning_content', None)
+            if reasoning:
+                reasoning_parts.append(reasoning)
+
+            # Tool calls arrive incrementally by index
+            for tc in (delta.tool_calls or []):
+                idx = tc.index
+                if idx not in tool_calls:
+                    tool_calls[idx] = {'id': tc.id or '', 'name': '', 'arguments': ''}
+                if tc.id:
+                    tool_calls[idx]['id'] = tc.id
+                if tc.function:
+                    if tc.function.name:
+                        tool_calls[idx]['name'] = tc.function.name
+                    if tc.function.arguments:
+                        tool_calls[idx]['arguments'] += tc.function.arguments
+
+        # Build content list
+        content = []
+        if reasoning_parts:
+            content.append(MessageContent(reasoning_content=ReasoningContent(
+                reasoning_text=ReasoningText(text=''.join(reasoning_parts), signature=''), redacted_content=b'')))
+        full_text = ''.join(text_parts)
+        if full_text:
+            content.append(MessageContent(text=full_text))
+        for idx in sorted(tool_calls):
+            tc = tool_calls[idx]
+            args = tc['arguments']
+            try:
+                args = json.loads(args)
+            except (json.JSONDecodeError, ValueError):
+                args = {"raw_input": args}
+            content.append(MessageContent(tool_use=ToolUse(tool_use_id=tc['id'], name=tc['name'], input=args)))
+
+        cache_read = 0
+        if usage:
+            details = getattr(usage, 'prompt_tokens_details', None)
+            if details:
+                cache_read = getattr(details, 'cached_tokens', 0) or 0
+
+        latency_ms = int((time.time() - start) * 1000)
+        return ConverseResponse(
+            output=ConverseOutput(message=Message(role='assistant', content=content)),
+            stop_reason=STOP_REASON_MAP.get(finish_reason or '', 'end_turn'),
+            usage=TokenUsage(
+                input_tokens=getattr(usage, 'prompt_tokens', 0) if usage else 0,
+                output_tokens=getattr(usage, 'completion_tokens', 0) if usage else 0,
+                total_tokens=getattr(usage, 'total_tokens', 0) if usage else 0,
+                cache_read_input_tokens=cache_read),
+            metrics=ConverseMetrics(latency_ms=latency_ms))
+
     def _get_response(self, messages=None):
         for callback in self.callbacks:
             try: callback.on_converse_start(self)
             except Exception as e: logger.warning(f"Callback error: {e}")
         params = self._build_params(messages)
+        params['stream'] = True
+        params['stream_options'] = {'include_usage': True}
         start = time.time()
         try:
-            completion = self.openai_client.chat.completions.create(**params)
+            stream = self.openai_client.chat.completions.create(**params)
+            response = self._consume_stream(stream, start)
         except Exception as error:
             for callback in self.callbacks:
                 try:
@@ -198,7 +274,6 @@ class _MantleTransport:
                 except Exception as callback_error:
                     logger.warning(f"Callback error: {callback_error}")
             raise
-        response = self._parse_completion(completion, int((time.time() - start) * 1000))
         response.model_id = self.model_id
         for callback in self.callbacks:
             try: callback.on_converse_end(response)
@@ -210,9 +285,57 @@ class _MantleTransport:
             try: callback.on_converse_start(self)
             except Exception as e: logger.warning(f"Callback error: {e}")
         params = self._build_params(messages)
+        params['stream'] = True
+        params['stream_options'] = {'include_usage': True}
         start = time.time()
         try:
-            completion = await self.async_openai_client.chat.completions.create(**params)
+            stream = await self.async_openai_client.chat.completions.create(**params)
+            # Async stream — collect chunks
+            text_parts, reasoning_parts, tool_calls_map, finish_reason, usage = [], [], {}, None, None
+            async for chunk in stream:
+                if chunk.usage: usage = chunk.usage
+                if not chunk.choices: continue
+                delta = chunk.choices[0].delta
+                if chunk.choices[0].finish_reason: finish_reason = chunk.choices[0].finish_reason
+                if delta.content: text_parts.append(delta.content)
+                reasoning = getattr(delta, 'reasoning', None) or getattr(delta, 'reasoning_content', None)
+                if reasoning: reasoning_parts.append(reasoning)
+                for tc in (delta.tool_calls or []):
+                    idx = tc.index
+                    if idx not in tool_calls_map:
+                        tool_calls_map[idx] = {'id': tc.id or '', 'name': '', 'arguments': ''}
+                    if tc.id: tool_calls_map[idx]['id'] = tc.id
+                    if tc.function:
+                        if tc.function.name: tool_calls_map[idx]['name'] = tc.function.name
+                        if tc.function.arguments: tool_calls_map[idx]['arguments'] += tc.function.arguments
+
+            content = []
+            if reasoning_parts:
+                content.append(MessageContent(reasoning_content=ReasoningContent(
+                    reasoning_text=ReasoningText(text=''.join(reasoning_parts), signature=''), redacted_content=b'')))
+            full_text = ''.join(text_parts)
+            if full_text: content.append(MessageContent(text=full_text))
+            for idx in sorted(tool_calls_map):
+                tc = tool_calls_map[idx]
+                args = tc['arguments']
+                try: args = json.loads(args)
+                except (json.JSONDecodeError, ValueError): args = {"raw_input": args}
+                content.append(MessageContent(tool_use=ToolUse(tool_use_id=tc['id'], name=tc['name'], input=args)))
+
+            cache_read = 0
+            if usage:
+                details = getattr(usage, 'prompt_tokens_details', None)
+                if details: cache_read = getattr(details, 'cached_tokens', 0) or 0
+
+            response = ConverseResponse(
+                output=ConverseOutput(message=Message(role='assistant', content=content)),
+                stop_reason=STOP_REASON_MAP.get(finish_reason or '', 'end_turn'),
+                usage=TokenUsage(
+                    input_tokens=getattr(usage, 'prompt_tokens', 0) if usage else 0,
+                    output_tokens=getattr(usage, 'completion_tokens', 0) if usage else 0,
+                    total_tokens=getattr(usage, 'total_tokens', 0) if usage else 0,
+                    cache_read_input_tokens=cache_read),
+                metrics=ConverseMetrics(latency_ms=int((time.time() - start) * 1000)))
         except Exception as error:
             for callback in self.callbacks:
                 try:
@@ -221,7 +344,6 @@ class _MantleTransport:
                 except Exception as callback_error:
                     logger.warning(f"Callback error: {callback_error}")
             raise
-        response = self._parse_completion(completion, int((time.time() - start) * 1000))
         response.model_id = self.model_id
         for callback in self.callbacks:
             try: callback.on_converse_end(response)

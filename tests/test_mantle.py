@@ -64,6 +64,73 @@ def _tool_call(name, arguments, call_id="call_123"):
     return {'id': call_id, 'function': {'name': name, 'arguments': json.dumps(arguments)}}
 
 
+def _mock_stream_chunk(content=None, tool_calls=None, finish_reason=None, usage=None, reasoning=None):
+    chunk = MagicMock()
+    chunk.usage = usage
+    has_choice = content or tool_calls or finish_reason or reasoning
+    if has_choice:
+        choice = MagicMock()
+        delta = MagicMock()
+        delta.content = content
+        delta.reasoning = reasoning
+        delta.reasoning_content = None
+        delta.tool_calls = tool_calls or []
+        choice.delta = delta
+        choice.finish_reason = finish_reason
+        chunk.choices = [choice]
+    else:
+        chunk.choices = []
+    return chunk
+
+
+def _mock_stream(content=None, tool_calls=None, finish_reason="stop",
+                 prompt_tokens=10, completion_tokens=5, total_tokens=15,
+                 reasoning=None, cached_tokens=None):
+    """Build a list of chunks that simulate an OpenAI streaming response."""
+    chunks = []
+    if reasoning:
+        chunks.append(_mock_stream_chunk(reasoning=reasoning))
+    if content:
+        # Split content into a few chunks for realism
+        chunks.append(_mock_stream_chunk(content=content))
+    if tool_calls:
+        for i, tc in enumerate(tool_calls):
+            mock_tc = MagicMock()
+            mock_tc.index = i
+            mock_tc.id = tc['id']
+            mock_tc.function = MagicMock()
+            mock_tc.function.name = tc['function']['name']
+            mock_tc.function.arguments = tc['function']['arguments']
+            chunks.append(_mock_stream_chunk(tool_calls=[mock_tc], finish_reason=None))
+    # Final chunk with finish reason + usage
+    usage = MagicMock()
+    usage.prompt_tokens = prompt_tokens
+    usage.completion_tokens = completion_tokens
+    usage.total_tokens = total_tokens
+    if cached_tokens is not None:
+        details = MagicMock()
+        details.cached_tokens = cached_tokens
+        usage.prompt_tokens_details = details
+    else:
+        usage.prompt_tokens_details = None
+    chunks.append(_mock_stream_chunk(finish_reason=finish_reason, usage=usage))
+    return iter(chunks)
+
+
+def _mock_async_stream(content=None, tool_calls=None, finish_reason="stop",
+                       prompt_tokens=10, completion_tokens=5, total_tokens=15,
+                       reasoning=None, cached_tokens=None):
+    """Build an async iterator of chunks."""
+    chunks = list(_mock_stream(content=content, tool_calls=tool_calls,
+                               finish_reason=finish_reason, prompt_tokens=prompt_tokens,
+                               completion_tokens=completion_tokens, total_tokens=total_tokens,
+                               reasoning=reasoning, cached_tokens=cached_tokens))
+    async def _aiter():
+        for c in chunks:
+            yield c
+    return _aiter()
+
+
 def _make_mock_session():
     session = MagicMock()
     creds = MagicMock()
@@ -114,7 +181,7 @@ class TestMantleInvoke(unittest.TestCase):
 
     def test_invoke_basic(self):
         m, client = self._make_mantle()
-        client.chat.completions.create.return_value = _mock_completion("Hi there")
+        client.chat.completions.create.return_value = _mock_stream("Hi there")
         resp = m.invoke("Hello")
         self.assertEqual(resp.content, "Hi there")
         client.chat.completions.create.assert_called_once()
@@ -123,7 +190,7 @@ class TestMantleInvoke(unittest.TestCase):
 
     def test_invoke_with_tool_calls(self):
         m, client = self._make_mantle()
-        client.chat.completions.create.return_value = _mock_completion(
+        client.chat.completions.create.return_value = _mock_stream(
             tool_calls=[_tool_call("my_tool", {"key": "value"})], finish_reason="tool_calls")
         resp = m.invoke("Use tool")
         self.assertEqual(resp.stop_reason, "tool_use")
@@ -133,7 +200,7 @@ class TestMantleInvoke(unittest.TestCase):
         m, client = self._make_mantle()
         m.add_system("Be helpful")
         m.add_system("Be concise")
-        client.chat.completions.create.return_value = _mock_completion()
+        client.chat.completions.create.return_value = _mock_stream(content="Hello!")
         m.invoke("Hi")
         call_kwargs = client.chat.completions.create.call_args[1]
         system_msg = call_kwargs['messages'][0]
@@ -149,7 +216,7 @@ class TestMantleCallbacks(unittest.TestCase):
         m.__dict__['openai_client'] = mock_client
         cb = MagicMock(spec=BaseCallbackHandler)
         m.callbacks = [cb]
-        mock_client.chat.completions.create.return_value = _mock_completion()
+        mock_client.chat.completions.create.return_value = _mock_stream(content="Hello!")
         m.invoke("Hi")
         cb.on_converse_start.assert_called_once()
         cb.on_converse_end.assert_called_once()
@@ -161,7 +228,7 @@ class TestMantleCallbacks(unittest.TestCase):
         cb = MagicMock(spec=BaseCallbackHandler)
         cb.on_converse_start.side_effect = Exception("boom")
         m.callbacks = [cb]
-        mock_client.chat.completions.create.return_value = _mock_completion()
+        mock_client.chat.completions.create.return_value = _mock_stream(content="Hello!")
         resp = m.invoke("Hi")
         self.assertEqual(resp.content, "Hello!")
 
@@ -195,7 +262,7 @@ class TestMantleCacheRemoval(unittest.TestCase):
         mock_client = MagicMock()
         m.__dict__['openai_client'] = mock_client
         m.system = [SystemContent(text="hi"), SystemContent(cache_point=CachePoint())]
-        mock_client.chat.completions.create.return_value = _mock_completion()
+        mock_client.chat.completions.create.return_value = _mock_stream(content="Hello!")
         m.invoke("Hi")
         self.assertEqual(len(m.system), 1)
 
@@ -209,7 +276,7 @@ class TestMantleAgent(unittest.TestCase):
 
     def test_run_exit(self):
         agent, client = self._make_agent()
-        client.chat.completions.create.return_value = _mock_completion(
+        client.chat.completions.create.return_value = _mock_stream(
             tool_calls=[_tool_call("Finish", {"final_response": "Done!"}, "t1")], finish_reason="tool_calls")
         result = agent.run("Do something")
         self.assertEqual(result, "Done!")
@@ -224,8 +291,8 @@ class TestMantleAgent(unittest.TestCase):
         agent.add_tool(lookup)
 
         client.chat.completions.create.side_effect = [
-            _mock_completion(tool_calls=[_tool_call("lookup", {"query": "meaning"}, "t1")], finish_reason="tool_calls"),
-            _mock_completion(tool_calls=[_tool_call("Finish", {"final_response": "42"}, "t2")], finish_reason="tool_calls"),
+            _mock_stream(tool_calls=[_tool_call("lookup", {"query": "meaning"}, "t1")], finish_reason="tool_calls"),
+            _mock_stream(tool_calls=[_tool_call("Finish", {"final_response": "42"}, "t2")], finish_reason="tool_calls"),
         ]
         result = agent.run("What is the meaning?")
         self.assertEqual(result, "42")
@@ -234,14 +301,14 @@ class TestMantleAgent(unittest.TestCase):
     def test_max_iterations(self):
         agent, client = self._make_agent()
         agent.max_iterations = 2
-        client.chat.completions.create.return_value = _mock_completion("Thinking...")
+        client.chat.completions.create.return_value = _mock_stream("Thinking...")
         result = agent.run("Do something")
         self.assertIn("maximum iterations", result)
 
     def test_on_text_hook(self):
         agent, client = self._make_agent()
         agent.on_text(lambda text: f"hooked: {text}")
-        client.chat.completions.create.return_value = _mock_completion("Some text")
+        client.chat.completions.create.return_value = _mock_stream("Some text")
         result = agent.run("Hi")
         self.assertEqual(result, "hooked: Some text")
 
@@ -251,7 +318,7 @@ class TestStructuredMantle(unittest.TestCase):
         sm = StructuredMantle(model_id="anthropic.claude-3-5-sonnet", region_name="us-east-1", output_model=TestOutput)
         mock_client = MagicMock()
         sm.__dict__['openai_client'] = mock_client
-        mock_client.chat.completions.create.return_value = _mock_completion(
+        mock_client.chat.completions.create.return_value = _mock_stream(
             tool_calls=[_tool_call("TestOutput", {"test_field": "val"}, "t1")], finish_reason="tool_calls")
         result = sm.invoke(Message().add_text("Extract"))
         self.assertIsInstance(result, TestOutput)
@@ -263,7 +330,7 @@ class TestMantleAsync(unittest.TestCase):
         m = Mantle(model_id="anthropic.claude-3-5-sonnet", region_name="us-east-1")
         mock_client = AsyncMock()
         m.__dict__['async_openai_client'] = mock_client
-        mock_client.chat.completions.create.return_value = _mock_completion("Async hi")
+        mock_client.chat.completions.create.return_value = _mock_async_stream("Async hi")
         resp = asyncio.new_event_loop().run_until_complete(m.ainvoke("Hello"))
         self.assertEqual(resp.content, "Async hi")
 
@@ -271,7 +338,7 @@ class TestMantleAsync(unittest.TestCase):
         m = Mantle(model_id="anthropic.claude-3-5-sonnet", region_name="us-east-1")
         mock_client = AsyncMock()
         m.__dict__['async_openai_client'] = mock_client
-        mock_client.chat.completions.create.return_value = _mock_completion("Async reply")
+        mock_client.chat.completions.create.return_value = _mock_async_stream("Async reply")
         asyncio.new_event_loop().run_until_complete(m.aconverse("Hello"))
         self.assertEqual(len(m.messages), 2)
 
@@ -297,7 +364,7 @@ class TestMantleParseCompletion(unittest.TestCase):
 
     def test_reasoning_trace_in_response(self):
         m, client = self._make_mantle()
-        client.chat.completions.create.return_value = _mock_completion(
+        client.chat.completions.create.return_value = _mock_stream(
             content="The answer is 42.", reasoning="Let me think step by step...")
         resp = m.invoke("Think about this")
         self.assertEqual(len(resp.output.message.content), 2)
@@ -310,20 +377,20 @@ class TestMantleParseCompletion(unittest.TestCase):
 
     def test_cached_tokens_in_usage(self):
         m, client = self._make_mantle()
-        client.chat.completions.create.return_value = _mock_completion(
+        client.chat.completions.create.return_value = _mock_stream(
             content="Hi", cached_tokens=500)
         resp = m.invoke("Hello")
         self.assertEqual(resp.usage.cache_read_input_tokens, 500)
 
     def test_no_cached_tokens_defaults_zero(self):
         m, client = self._make_mantle()
-        client.chat.completions.create.return_value = _mock_completion(content="Hi")
+        client.chat.completions.create.return_value = _mock_stream(content="Hi")
         resp = m.invoke("Hello")
         self.assertEqual(resp.usage.cache_read_input_tokens, 0)
 
     def test_reasoning_before_tool_calls(self):
         m, client = self._make_mantle()
-        client.chat.completions.create.return_value = _mock_completion(
+        client.chat.completions.create.return_value = _mock_stream(
             tool_calls=[_tool_call("my_tool", {"key": "val"})],
             finish_reason="tool_calls", reasoning="I should use the tool")
         resp = m.invoke("Use tool")
