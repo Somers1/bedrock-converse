@@ -11,7 +11,7 @@ from openai import OpenAI, AsyncOpenAI
 
 from .converse import (Converse, ConverseAgent, StructuredConverse, ConverseResponse, ConverseOutput,
                        Message, MessageContent, ToolUse, TokenUsage, ConverseMetrics,
-                       ReasoningContent, ReasoningText)
+                       ReasoningContent, ReasoningText, AdditionalModelRequestFields, ThinkingConfig)
 
 logger = logging.getLogger(__name__)
 
@@ -254,6 +254,16 @@ class _MantleTransport:
                 total_tokens=getattr(usage, 'total_tokens', 0) if usage else 0,
                 cache_read_input_tokens=cache_read),
             metrics=ConverseMetrics(latency_ms=latency_ms))
+
+    def with_thinking(self, tokens: int | str = 1024, enabled: bool = True):
+        thinking_config = ThinkingConfig(
+            type="enabled" if enabled else "disabled",
+            budget_tokens=tokens
+        )
+        if self.additional_model_request_fields is None:
+            self.additional_model_request_fields = AdditionalModelRequestFields()
+        self.additional_model_request_fields.thinking = thinking_config
+        return self
 
     def _get_response(self, messages=None):
         for callback in self.callbacks:
