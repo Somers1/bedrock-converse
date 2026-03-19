@@ -16,8 +16,9 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+openai = ["openai>=1.0"]
 image = ["pillow>=9.0"]
-all = ["pillow>=9.0", "jsonschema"]
+all = ["pillow>=9.0", "jsonschema", "openai>=1.0"]
 
 [tool.setuptools.packages.find]
 where = ["src"]

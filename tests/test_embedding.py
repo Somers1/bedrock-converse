@@ -2,14 +2,14 @@ import asyncio
 import json
 import os
 import sys
-import time
 import unittest
-from unittest.mock import MagicMock, patch, PropertyMock
+from unittest.mock import MagicMock, patch
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'src'))
 
 from bedrock.embedding import (
-    BedrockEmbedding, MultimodalInput, EmbeddingResponse,
+    BedrockEmbedding, OpenAIEmbedding, MantleEmbedding,
+    MultimodalInput, EmbeddingResponse,
     TextChunker, ChunkerConfig,
     S3VectorsStore, VectorItem, VectorResponse,
 )
@@ -119,6 +119,88 @@ class TestBedrockEmbedding(unittest.TestCase):
         _ = emb.client
         mock_session_cls.assert_called_with(
             region_name='ap-southeast-2', aws_access_key_id="ak", aws_secret_access_key="sk")
+
+
+class TestOpenAIEmbedding(unittest.TestCase):
+    def _mock_openai_response(self, vectors, model="accounts/fireworks/models/qwen3-embedding-8b"):
+        item_cls = lambda embedding: type("EmbeddingItem", (), {"embedding": embedding})()
+        return type(
+            "EmbeddingResult",
+            (),
+            {
+                "data": [item_cls(vector) for vector in vectors],
+                "model": model,
+                "object": "list",
+            },
+        )()
+
+    @patch('bedrock.embedding._get_openai_clients')
+    def test_embed_texts(self, mock_get_clients):
+        mock_client = MagicMock()
+        mock_client.embeddings.create.return_value = self._mock_openai_response([[0.1, 0.2]])
+        mock_openai_cls = MagicMock(return_value=mock_client)
+        mock_get_clients.return_value = (mock_openai_cls, MagicMock())
+
+        emb = OpenAIEmbedding(
+            model_id="accounts/fireworks/models/qwen3-embedding-8b",
+            api_key="fw-key",
+            base_url="https://api.fireworks.ai/inference/v1",
+        )
+        resp = emb.embed_texts(["hello"])
+
+        mock_openai_cls.assert_called_once_with(
+            api_key="fw-key",
+            base_url="https://api.fireworks.ai/inference/v1",
+        )
+        mock_client.embeddings.create.assert_called_once_with(
+            model="accounts/fireworks/models/qwen3-embedding-8b",
+            input=["hello"],
+            encoding_format="float",
+        )
+        self.assertEqual(resp.embeddings, {"float": [[0.1, 0.2]]})
+        self.assertEqual(resp.texts, ["hello"])
+
+    @patch('bedrock.embedding._get_openai_clients')
+    def test_embed_query(self, mock_get_clients):
+        mock_client = MagicMock()
+        mock_client.embeddings.create.return_value = self._mock_openai_response([[0.1, 0.2, 0.3]])
+        mock_openai_cls = MagicMock(return_value=mock_client)
+        mock_get_clients.return_value = (mock_openai_cls, MagicMock())
+
+        emb = OpenAIEmbedding(model_id="accounts/fireworks/models/qwen3-embedding-8b")
+        result = emb.embed_query("search term")
+        self.assertEqual(result, [0.1, 0.2, 0.3])
+
+    @patch('bedrock.embedding._get_openai_clients')
+    def test_aembed_texts(self, mock_get_clients):
+        response = self._mock_openai_response([[0.9]])
+
+        class AsyncEmbeddingsClient:
+            async def create(self, **kwargs):
+                return response
+
+        async_client = type("AsyncClient", (), {"embeddings": AsyncEmbeddingsClient()})()
+        mock_get_clients.return_value = (MagicMock(), MagicMock(return_value=async_client))
+
+        emb = OpenAIEmbedding(model_id="accounts/fireworks/models/qwen3-embedding-8b")
+        resp = asyncio.get_event_loop().run_until_complete(emb.aembed_texts(["hello"]))
+
+        self.assertEqual(resp.embeddings, {"float": [[0.9]]})
+
+    def test_embed_images_not_supported(self):
+        emb = OpenAIEmbedding()
+        with self.assertRaises(NotImplementedError):
+            emb.embed_images(["abc"])
+
+    def test_mantle_embedding_base_url_from_region(self):
+        emb = MantleEmbedding(region_name="us-west-2")
+        self.assertEqual(emb.base_url, "https://bedrock-mantle.us-west-2.api.aws/v1")
+
+    @patch.dict(os.environ, {"MANTLE_ENDPOINT": "https://example.mantle/v1", "MANTLE_API_KEY": "mantle-key"})
+    def test_mantle_embedding_uses_env(self):
+        emb = MantleEmbedding()
+        self.assertEqual(emb.base_url, "https://example.mantle/v1")
+        self.assertEqual(emb.api_key, "mantle-key")
 
 
 # ══════════════════════════════════════════════════════════════════════════════

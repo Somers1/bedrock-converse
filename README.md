@@ -343,6 +343,23 @@ inp = MultimodalInput().add_text("A cat").add_image(base64_data, "image/png")
 response = emb.embed_multimodal([inp])
 ```
 
+OpenAI-compatible embedding endpoints such as Fireworks can use the same helper methods:
+
+```python
+from bedrock import OpenAIEmbedding
+
+emb = OpenAIEmbedding(
+    model_id="accounts/fireworks/models/qwen3-embedding-8b",
+    base_url="https://api.fireworks.ai/inference/v1",
+    api_key="fw_...",
+)
+
+query_vector = emb.embed_query("search term")
+doc_vectors = emb.embed_documents(["doc 1 text", "doc 2 text"])
+```
+
+If you're using Bedrock Mantle's OpenAI-compatible endpoint, use `MantleEmbedding` instead.
+
 ### Text Chunking
 
 ```python

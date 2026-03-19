@@ -1,9 +1,11 @@
 import asyncio
 import base64
 import json
+import os
 import time
 from dataclasses import dataclass
 from dataclasses import field
+from functools import cached_property
 from typing import Iterable
 from typing import List, Literal, Optional, Union, Dict, Any
 
@@ -39,6 +41,132 @@ class EmbeddingResponse:
     embeddings: Union[List[List[float]], Dict[str, List[List]]]
     texts: Optional[List[str]] = None
     inputs: Optional[List[Dict]] = None
+
+
+def _get_openai_clients():
+    try:
+        from openai import OpenAI, AsyncOpenAI
+    except ImportError as exc:
+        raise ImportError(
+            "OpenAI-compatible embeddings require the 'openai' package. "
+            "Install it with `pip install openai`."
+        ) from exc
+    return OpenAI, AsyncOpenAI
+
+
+class _OpenAIEmbeddingTransport:
+    api_key: Optional[str] = None
+    base_url: Optional[str] = None
+    organization: Optional[str] = None
+    project: Optional[str] = None
+    dimensions: Optional[int] = None
+    encoding_format: Literal["float", "base64"] = "float"
+    user: Optional[str] = None
+    extra_body: Dict[str, Any] = field(default_factory=dict)
+
+    def _get_client(self, client_class):
+        kwargs = {}
+        api_key = self.api_key or os.environ.get("OPENAI_API_KEY")
+        if api_key:
+            kwargs["api_key"] = api_key
+        if self.base_url:
+            kwargs["base_url"] = self.base_url
+        if self.organization:
+            kwargs["organization"] = self.organization
+        if self.project:
+            kwargs["project"] = self.project
+        return client_class(**kwargs)
+
+    @cached_property
+    def openai_client(self):
+        openai_class, _ = _get_openai_clients()
+        return self._get_client(openai_class)
+
+    @cached_property
+    def async_openai_client(self):
+        _, async_openai_class = _get_openai_clients()
+        return self._get_client(async_openai_class)
+
+    def _build_embedding_params(self, texts: List[str]) -> Dict[str, Any]:
+        params: Dict[str, Any] = {
+            "model": self.model_id,
+            "input": texts,
+            "encoding_format": self.encoding_format,
+        }
+        if self.dimensions is not None:
+            params["dimensions"] = self.dimensions
+        if self.user:
+            params["user"] = self.user
+        if self.extra_body:
+            params["extra_body"] = self.extra_body
+        return params
+
+    @staticmethod
+    def _parse_openai_response(response, texts: List[str]) -> EmbeddingResponse:
+        data = getattr(response, "data", None)
+        if data is None and isinstance(response, dict):
+            data = response.get("data", [])
+
+        vectors = []
+        for item in data or []:
+            embedding = getattr(item, "embedding", None)
+            if embedding is None and isinstance(item, dict):
+                embedding = item.get("embedding")
+            vectors.append(list(embedding or []))
+
+        response_id = getattr(response, "id", None)
+        response_object = getattr(response, "object", None)
+        response_model = getattr(response, "model", None)
+        if isinstance(response, dict):
+            response_id = response_id or response.get("id")
+            response_object = response_object or response.get("object")
+            response_model = response_model or response.get("model")
+
+        return EmbeddingResponse(
+            id=str(response_id or response_model or "embeddings"),
+            response_type=str(response_object or "list"),
+            embeddings={"float": vectors},
+            texts=texts,
+        )
+
+    def embed_texts(self, texts: List[str], input_type: Optional[str] = None) -> EmbeddingResponse:
+        del input_type
+        response = self.openai_client.embeddings.create(**self._build_embedding_params(texts))
+        return self._parse_openai_response(response, texts)
+
+    async def aembed_texts(self, texts: List[str], input_type: Optional[str] = None) -> EmbeddingResponse:
+        del input_type
+        response = await self.async_openai_client.embeddings.create(**self._build_embedding_params(texts))
+        return self._parse_openai_response(response, texts)
+
+    def embed_images(self, images: List[str], input_type: Optional[str] = None) -> EmbeddingResponse:
+        del images, input_type
+        raise NotImplementedError("OpenAI-compatible embedding wrappers currently support text embeddings only.")
+
+    async def aembed_images(self, images: List[str], input_type: Optional[str] = None) -> EmbeddingResponse:
+        del images, input_type
+        raise NotImplementedError("OpenAI-compatible embedding wrappers currently support text embeddings only.")
+
+    def embed_multimodal(self, inputs: List[MultimodalInput], input_type: Optional[str] = None) -> EmbeddingResponse:
+        del inputs, input_type
+        raise NotImplementedError("OpenAI-compatible embedding wrappers currently support text embeddings only.")
+
+    async def aembed_multimodal(self, inputs: List[MultimodalInput],
+                                input_type: Optional[str] = None) -> EmbeddingResponse:
+        del inputs, input_type
+        raise NotImplementedError("OpenAI-compatible embedding wrappers currently support text embeddings only.")
+
+    def embed_query(self, text: str):
+        return self.embed_texts([text], input_type="search_query").embeddings['float'][0]
+
+    async def aembed_query(self, text: str) -> EmbeddingResponse:
+        return await self.aembed_texts([text], input_type="search_query")
+
+    def embed_documents(self, texts: List[str]) -> EmbeddingResponse:
+        return self.embed_texts(texts, input_type="search_document")
+
+    async def aembed_documents(self, texts: List[str]) -> EmbeddingResponse:
+        return await self.aembed_texts(texts, input_type="search_document")
 
 
 @dataclass
@@ -172,6 +300,36 @@ class BedrockEmbedding:
 
     async def aembed_documents(self, texts: List[str]) -> EmbeddingResponse:
         return await self.aembed_texts(texts, input_type="search_document")
+
+
+@dataclass
+class OpenAIEmbedding(_OpenAIEmbeddingTransport):
+    model_id: str = "text-embedding-3-large"
+    api_key: Optional[str] = None
+    base_url: Optional[str] = None
+    organization: Optional[str] = None
+    project: Optional[str] = None
+    dimensions: Optional[int] = None
+    encoding_format: Literal["float", "base64"] = "float"
+    user: Optional[str] = None
+    extra_body: Dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class MantleEmbedding(OpenAIEmbedding):
+    region_name: str = 'ap-southeast-2'
+
+    @property
+    def _mantle_base_url(self):
+        if endpoint := os.environ.get('MANTLE_ENDPOINT'):
+            return endpoint
+        return f'https://bedrock-mantle.{self.region_name}.api.aws/v1'
+
+    def __post_init__(self):
+        if self.base_url is None:
+            self.base_url = self._mantle_base_url
+        if self.api_key is None:
+            self.api_key = os.environ.get('MANTLE_API_KEY')
 
 
 @dataclass
@@ -344,4 +502,3 @@ class S3VectorsStore:
                         raise
                     time.sleep(self.backoff_base * (2 ** attempt))
                     attempt += 1
-
