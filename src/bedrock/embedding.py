@@ -42,6 +42,8 @@ class EmbeddingResponse:
     texts: Optional[List[str]] = None
     inputs: Optional[List[Dict]] = None
 
+    def __iter__(self):
+        yield from self.embeddings['float']
 
 def _get_openai_clients():
     try:
