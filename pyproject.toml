@@ -13,12 +13,13 @@ dependencies = [
     "pydantic>=2.0",
     "json5",
     "json-repair",
+    "jsonschema"
 ]
 
 [project.optional-dependencies]
 openai = ["openai>=1.0"]
 image = ["pillow>=9.0"]
-all = ["pillow>=9.0", "jsonschema", "openai>=1.0"]
+all = ["pillow>=9.0", "openai>=1.0"]
 
 [tool.setuptools.packages.find]
 where = ["src"]
