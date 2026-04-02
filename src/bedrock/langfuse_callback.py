@@ -618,8 +618,9 @@ class LangfuseCallback(BaseCallbackHandler):
         if not self.enabled:
             return
 
-        propagate = getattr(self._langfuse, "propagate_attributes", None)
-        if not callable(propagate):
+        try:
+            from langfuse import propagate_attributes as propagate
+        except ImportError:
             return
 
         kwargs: Dict[str, Any] = {
