@@ -1263,7 +1263,7 @@ class ConverseAgent(Converse):
     suppress_text_during_loop: bool = True
 
     def __post_init__(self):
-        super()._TO_DICT_EXCLUSIONS.extend(['max_iterations', 'exit_tool', 'structured_output', 'debug', '_list_wrapped', '_on_text', 'suppress_text_during_loop'])
+        super()._TO_DICT_EXCLUSIONS.extend(['max_iterations', 'exit_tool', 'structured_output', 'debug', '_list_wrapped', '_on_text', 'suppress_text_during_loop', 'ref_registry'])
 
     def on_text(self, hook: callable):
         """Register a hook called when the agent responds with text instead of tools.
@@ -1377,8 +1377,29 @@ class ConverseAgent(Converse):
         if converse.performance_config:
             self.performance_config = converse.performance_config
 
+    REF_PATTERN = re.compile(r'\[ref:(\w+)=(\d+)\]')
+
+    def resolve_refs(self, tool_input):
+        resolved = {}
+        for key, value in tool_input.items():
+            if key.endswith('_ref') and isinstance(value, str) and value in self.ref_registry:
+                id_key = key[:-4] + '_id'
+                resolved[id_key] = self.ref_registry[value]
+            elif isinstance(value, str):
+                resolved[key] = self.resolve_message_refs(value)
+            else:
+                resolved[key] = value
+        return resolved
+
+    def extract_refs(self, result_str):
+        clean = self.REF_PATTERN.sub('', result_str).rstrip()
+        for match in self.REF_PATTERN.finditer(result_str):
+            self.ref_registry[match.group(1)] = int(match.group(2))
+        return clean
+
     def run(self, message: Message | str = None, max_iterations=None, first_tool_only=True):
         max_iterations = max_iterations or self.max_iterations
+        self.ref_registry = {}
 
         if self.structured_output:
             self.bind_exit_tool(self.structured_output)
@@ -1408,7 +1429,7 @@ class ConverseAgent(Converse):
             for content in response.output.message.content:
                 if content.tool_use:
                     tool_name = content.tool_use.name
-                    tool_input = content.tool_use.input
+                    tool_input = self.resolve_refs(content.tool_use.input)
                     tool_use_id = content.tool_use.tool_use_id
                     if self.debug:
                         logger.warning(f'Called {tool_name} for {tool_input}')
@@ -1430,9 +1451,11 @@ class ConverseAgent(Converse):
                             if switch := getattr(tool, '_model_switch', None):
                                 tool_input = self.execute_model_switch(switch, content.tool_use)
                             result = self.tool_registry.execute(tool_name, tool_input)
+                        result_str = str(result)
+                        result_str = self.extract_refs(result_str)
                         tool_result = ToolResult(
                             tool_use_id=tool_use_id,
-                            content=[ToolResultContent(text=str(result))],
+                            content=[ToolResultContent(text=result_str)],
                             status="success"
                         )
                         for cb in self.callbacks:
@@ -1455,7 +1478,9 @@ class ConverseAgent(Converse):
             if not tool_results:
                 text_parts = [c.text for c in response.output.message.content if c.text]
                 if text_parts and self._on_text:
-                    on_text_result = self._on_text('\n'.join(text_parts))
+                    text = '\n'.join(text_parts)
+                    text = self.resolve_message_refs(text)
+                    on_text_result = self._on_text(text)
                     if on_text_result is not None:
                         return self._fire_run_end(on_text_result)
                 return self._fire_run_end('\n'.join(text_parts) if text_parts else None)
@@ -1479,3 +1504,11 @@ class ConverseAgent(Converse):
                 else:
                     logger.warning("Exit tool called but other tools errored — looping back for retry")
         return self._fire_run_end(f"Agent reached maximum iterations ({max_iterations}) without calling exit tool")
+
+    def resolve_message_refs(self, text):
+        def replace_ref(match):
+            prefix, ref_key = match.group(1), match.group(2)
+            if ref_key in self.ref_registry:
+                return f'{prefix}:{self.ref_registry[ref_key]}'
+            return match.group(0)
+        return re.sub(r'(schema|entry|todo|event|reminder|contact):([a-zA-Z_]\w*)', replace_ref, text)
