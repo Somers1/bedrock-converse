@@ -365,6 +365,15 @@ class _MantleTransport:
 class Mantle(_MantleTransport, Converse):
     api_key: Optional[str] = None
 
+    @property
+    def structured_output_class(self):
+        return StructuredMantle
+
+    def with_structured_output(self, output_model, force_choice=True, skip_add_tool=False, first_tool_only=True):
+        structured = super().with_structured_output(output_model, force_choice, skip_add_tool, first_tool_only)
+        structured.api_key = self.api_key
+        return structured
+
 
 @dataclass
 class MantleAgent(_MantleTransport, ConverseAgent):

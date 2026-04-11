@@ -1011,6 +1011,10 @@ class Converse(ToDictMixin, FromDictMixin):
             self.inference_config.top_p = None
         return self
 
+    @property
+    def structured_output_class(self):
+        return structured_model_factory(self.model_id)
+
     def with_structured_output(self, output_model, force_choice=True, skip_add_tool=False, first_tool_only=True):
         assert not (skip_add_tool is True and len(
             self.tool_config.tools) == 0), "If you skip_add_tool you must add tools manually using bind_tools."
@@ -1020,7 +1024,7 @@ class Converse(ToDictMixin, FromDictMixin):
             force_choice = False
 
         # noinspection PyArgumentList
-        return structured_model_factory(self.model_id)(
+        return self.structured_output_class(
             model_id=self.model_id,
             messages=self.messages.copy(),
             system=self.system,
@@ -1034,7 +1038,7 @@ class Converse(ToDictMixin, FromDictMixin):
             performance_config=self.performance_config,
             region_name=self.region_name,
             callbacks=self.callbacks,
-            _client=self.client,
+            _client=self._client,
             _async_client=self._async_client,
             aws_access_key_id=self.aws_access_key_id,
             aws_secret_access_key=self.aws_secret_access_key,
