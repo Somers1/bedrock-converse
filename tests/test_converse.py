@@ -806,6 +806,11 @@ class TestExtractRefs(unittest.TestCase):
         result = self.agent.extract_refs("Created [ref:item=550e8400-e29b-41d4-a716-446655440000]")
         self.assertEqual(self.agent.ref_registry["item"], "550e8400-e29b-41d4-a716-446655440000")
 
+    def test_hyphenated_ref_key(self):
+        result = self.agent.extract_refs("Created [ref:test-event=20]")
+        self.assertEqual(self.agent.ref_registry["test-event"], "20")
+        self.assertEqual(result, "Created")
+
 
 class TestResolveRefs(unittest.TestCase):
 
@@ -857,6 +862,11 @@ class TestResolveMessageRefs(unittest.TestCase):
         self.agent.ref_registry = {"my_item": "7"}
         result = self.agent.resolve_message_refs("custom_type:my_item")
         self.assertEqual(result, "custom_type:7")
+
+    def test_hyphenated_ref(self):
+        self.agent.ref_registry = {"test-event": "20"}
+        result = self.agent.resolve_message_refs("schema:test-event")
+        self.assertEqual(result, "schema:20")
 
 
 if __name__ == '__main__':
