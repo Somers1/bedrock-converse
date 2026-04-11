@@ -1254,6 +1254,7 @@ class ConverseAgent(Converse):
     debug: bool = False
     _list_wrapped: bool = False  # Track if we wrapped a List type
     _on_text: Optional[callable] = None
+    ref_registry: dict = field(default_factory=dict)
 
     # Suppress text content when the model responds with both text and tool calls in the same turn.
     # Prevents a class of hallucination where the model writes conversational text (questions, recaps)
@@ -1377,14 +1378,17 @@ class ConverseAgent(Converse):
         if converse.performance_config:
             self.performance_config = converse.performance_config
 
-    REF_PATTERN = re.compile(r'\[ref:(\w+)=(\d+)\]')
+    REF_PATTERN = re.compile(r'\[ref:(\w+)=([^\]]+)\]')
 
     def resolve_refs(self, tool_input):
         resolved = {}
         for key, value in tool_input.items():
-            if key.endswith('_ref') and isinstance(value, str) and value in self.ref_registry:
-                id_key = key[:-4] + '_id'
-                resolved[id_key] = self.ref_registry[value]
+            if key.endswith('_ref') and isinstance(value, str):
+                if value in self.ref_registry:
+                    id_key = key[:-4] + '_id'
+                    resolved[id_key] = self.ref_registry[value]
+                else:
+                    resolved[key] = value
             elif isinstance(value, str):
                 resolved[key] = self.resolve_message_refs(value)
             else:
@@ -1393,8 +1397,9 @@ class ConverseAgent(Converse):
 
     def extract_refs(self, result_str):
         clean = self.REF_PATTERN.sub('', result_str).rstrip()
+        clean = re.sub(r' {2,}', ' ', clean)
         for match in self.REF_PATTERN.finditer(result_str):
-            self.ref_registry[match.group(1)] = int(match.group(2))
+            self.ref_registry[match.group(1)] = match.group(2)
         return clean
 
     def run(self, message: Message | str = None, max_iterations=None, first_tool_only=True):
@@ -1483,7 +1488,10 @@ class ConverseAgent(Converse):
                     on_text_result = self._on_text(text)
                     if on_text_result is not None:
                         return self._fire_run_end(on_text_result)
-                return self._fire_run_end('\n'.join(text_parts) if text_parts else None)
+                text = '\n'.join(text_parts) if text_parts else None
+                if text:
+                    text = self.resolve_message_refs(text)
+                return self._fire_run_end(text)
             if tool_results:
                 tool_message = Message(role="user")
                 for result in tool_results:
@@ -1511,4 +1519,4 @@ class ConverseAgent(Converse):
             if ref_key in self.ref_registry:
                 return f'{prefix}:{self.ref_registry[ref_key]}'
             return match.group(0)
-        return re.sub(r'(schema|entry|todo|event|reminder|contact):([a-zA-Z_]\w*)', replace_ref, text)
+        return re.sub(r'(\w+):([a-zA-Z_]\w*)', replace_ref, text)

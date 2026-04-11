@@ -773,5 +773,91 @@ class TestEdgeCases(unittest.TestCase):
         self.assertIsNone(result)
 
 
+# ══════════════════════════════════════════════════════════════════════════════
+#  Ref registry
+# ══════════════════════════════════════════════════════════════════════════════
+
+class TestExtractRefs(unittest.TestCase):
+
+    def setUp(self):
+        self.agent = ConverseAgent(model_id="anthropic.claude-3-5-sonnet-20241022-v2:0")
+
+    def test_basic_extraction(self):
+        result = self.agent.extract_refs("Created todo [ref:grocery_list=42]")
+        self.assertEqual(result, "Created todo")
+        self.assertEqual(self.agent.ref_registry, {"grocery_list": "42"})
+
+    def test_multiple_refs(self):
+        result = self.agent.extract_refs("Items [ref:todo=1] and [ref:note=abc-123]")
+        self.assertEqual(self.agent.ref_registry, {"todo": "1", "note": "abc-123"})
+        self.assertNotIn("[ref:", result)
+
+    def test_no_refs(self):
+        result = self.agent.extract_refs("No refs here")
+        self.assertEqual(result, "No refs here")
+        self.assertEqual(self.agent.ref_registry, {})
+
+    def test_double_space_cleanup(self):
+        result = self.agent.extract_refs("Created [ref:todo=1] successfully")
+        self.assertNotIn("  ", result)
+        self.assertEqual(result, "Created successfully")
+
+    def test_uuid_id(self):
+        result = self.agent.extract_refs("Created [ref:item=550e8400-e29b-41d4-a716-446655440000]")
+        self.assertEqual(self.agent.ref_registry["item"], "550e8400-e29b-41d4-a716-446655440000")
+
+
+class TestResolveRefs(unittest.TestCase):
+
+    def setUp(self):
+        self.agent = ConverseAgent(model_id="anthropic.claude-3-5-sonnet-20241022-v2:0")
+
+    def test_ref_found(self):
+        self.agent.ref_registry = {"grocery_list": "42"}
+        result = self.agent.resolve_refs({"todo_ref": "grocery_list", "title": "Buy milk"})
+        self.assertEqual(result, {"todo_id": "42", "title": "Buy milk"})
+
+    def test_ref_not_found_passes_through(self):
+        self.agent.ref_registry = {}
+        result = self.agent.resolve_refs({"todo_ref": "unknown_key", "title": "Buy milk"})
+        self.assertEqual(result, {"todo_ref": "unknown_key", "title": "Buy milk"})
+
+    def test_inline_message_ref_in_string_value(self):
+        self.agent.ref_registry = {"grocery_list": "42"}
+        result = self.agent.resolve_refs({"message": "Check todo:grocery_list for details"})
+        self.assertEqual(result["message"], "Check todo:42 for details")
+
+    def test_non_string_values_pass_through(self):
+        self.agent.ref_registry = {}
+        result = self.agent.resolve_refs({"count": 5, "active": True, "tags": ["a", "b"]})
+        self.assertEqual(result, {"count": 5, "active": True, "tags": ["a", "b"]})
+
+
+class TestResolveMessageRefs(unittest.TestCase):
+
+    def setUp(self):
+        self.agent = ConverseAgent(model_id="anthropic.claude-3-5-sonnet-20241022-v2:0")
+
+    def test_ref_found(self):
+        self.agent.ref_registry = {"grocery_list": "42"}
+        result = self.agent.resolve_message_refs("Check todo:grocery_list")
+        self.assertEqual(result, "Check todo:42")
+
+    def test_ref_not_found_unchanged(self):
+        self.agent.ref_registry = {}
+        result = self.agent.resolve_message_refs("Check todo:grocery_list")
+        self.assertEqual(result, "Check todo:grocery_list")
+
+    def test_multiple_refs(self):
+        self.agent.ref_registry = {"grocery_list": "42", "work_tasks": "99"}
+        result = self.agent.resolve_message_refs("See todo:grocery_list and list:work_tasks")
+        self.assertEqual(result, "See todo:42 and list:99")
+
+    def test_dynamic_prefix(self):
+        self.agent.ref_registry = {"my_item": "7"}
+        result = self.agent.resolve_message_refs("custom_type:my_item")
+        self.assertEqual(result, "custom_type:7")
+
+
 if __name__ == '__main__':
     unittest.main()
