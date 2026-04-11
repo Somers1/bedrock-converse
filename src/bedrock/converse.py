@@ -192,6 +192,9 @@ class ToolRegistry:
     def get_tool(self, tool_name: str) -> Optional[Callable]:
         return self.tools.get(tool_name)
 
+    def set_model_switch(self, tool_name: str, switch):
+        self.tools[self._resolve_tool_name(tool_name)]._model_switch = switch
+
     def list_tools(self) -> List[str]:
         return list(self.tools.keys())
 
@@ -575,6 +578,11 @@ class Message(ToDictMixin, FromDictMixin):
 
     def add_cache_point(self, ttl: Literal["5m", "1h"] | None = None):
         self.content.append(MessageContent(cache_point=CachePoint(ttl=ttl)))
+        return self
+
+    def add_tool_result(self, tool_use_id, text, status="success"):
+        self.content.append(MessageContent(tool_result=ToolResult(
+            tool_use_id=tool_use_id, content=[ToolResultContent(text=text)], status=status)))
         return self
 
     def get_document_names(self):
@@ -1323,6 +1331,52 @@ class ConverseAgent(Converse):
                 cb.on_run_end(self, result)
         return result
 
+    def execute_model_switch(self, switch, tool_use):
+        target = next(t for t in self.tool_config.tools if t.tool_spec and t.tool_spec.name == tool_use.name)
+        saved = self.snapshot_config()
+        self.apply_converse_config(switch.converse)
+        self.tool_config = ConverseToolConfig(tools=[target])
+        self.messages.append(Message(role="user").add_tool_result(tool_use.tool_use_id, switch.message, status="error"))
+        try:
+            response = self._get_response()
+        finally:
+            self.restore_config(saved)
+            self.messages.pop()
+        return self.rewrite_tool_input(response, tool_use)
+
+    def rewrite_tool_input(self, response, tool_use):
+        new_input = tool_use.input
+        for c in (response.output.message.content if response.output.message else []):
+            if c.tool_use and c.tool_use.name == tool_use.name:
+                new_input = c.tool_use.input
+                break
+        for c in self.messages[-1].content:
+            if c.tool_use and c.tool_use.tool_use_id == tool_use.tool_use_id:
+                c.tool_use.input = new_input
+                break
+        return new_input
+
+    def snapshot_config(self):
+        return (self.model_id, self.tool_config, self.region_name, self._client, self.inference_config,
+                self.additional_model_request_fields, self.guardrail_config, self.performance_config)
+
+    def restore_config(self, saved):
+        (self.model_id, self.tool_config, self.region_name, self._client, self.inference_config,
+         self.additional_model_request_fields, self.guardrail_config, self.performance_config) = saved
+
+    def apply_converse_config(self, converse):
+        self.model_id = converse.model_id
+        if converse.region_name:
+            self.region_name, self._client = converse.region_name, None
+        if converse.inference_config:
+            self.inference_config = converse.inference_config
+        if converse.additional_model_request_fields:
+            self.additional_model_request_fields = converse.additional_model_request_fields
+        if converse.guardrail_config:
+            self.guardrail_config = converse.guardrail_config
+        if converse.performance_config:
+            self.performance_config = converse.performance_config
+
     def run(self, message: Message | str = None, max_iterations=None, first_tool_only=True):
         max_iterations = max_iterations or self.max_iterations
 
@@ -1372,6 +1426,9 @@ class ConverseAgent(Converse):
                                 result = self.tool_registry.execute(tool_name, tool_input)
                             exit_tool_results.append(result)
                         else:
+                            tool = self.tool_registry.get_tool(tool_name)
+                            if switch := getattr(tool, '_model_switch', None):
+                                tool_input = self.execute_model_switch(switch, content.tool_use)
                             result = self.tool_registry.execute(tool_name, tool_input)
                         tool_result = ToolResult(
                             tool_use_id=tool_use_id,

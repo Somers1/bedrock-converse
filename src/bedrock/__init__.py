@@ -6,7 +6,7 @@ from .converse import (
     ConverseToolConfig, AdditionalModelRequestFields, ConversePerformanceConfig,
     Finish, structured_model_factory
 )
-from .tools import tool, Tools, exit_tool
+from .tools import tool, Tools, exit_tool, ModelSwitch, model_switch
 from .embedding import (
     BedrockEmbedding, OpenAIEmbedding, MantleEmbedding,
     MultimodalInput, EmbeddingResponse, TextChunker, S3VectorsStore,

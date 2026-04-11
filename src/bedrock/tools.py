@@ -1,7 +1,24 @@
 import inspect
+from dataclasses import dataclass
 from functools import wraps
 from typing import get_type_hints, Any, Callable, Optional
 import jsonschema
+
+
+@dataclass
+class ModelSwitch:
+    converse: Any
+    message: str = "Tool call rejected. Please try again."
+
+
+def model_switch(converse, message=None):
+    def decorator(func):
+        kwargs = {"converse": converse}
+        if message:
+            kwargs["message"] = message
+        func._model_switch = ModelSwitch(**kwargs)
+        return func
+    return decorator
 
 
 def tool(func: Optional[Callable] = None, *, name: Optional[str] = None, description: Optional[str] = None):
@@ -227,6 +244,8 @@ class Tools:
             wrapper._tool_spec = tool_info['spec']
             wrapper._original_function = bound_method
             wrapper._execute = bound_method
+            if switch := getattr(bound_method.__func__, '_model_switch', None):
+                wrapper._model_switch = switch
 
             tools.append(wrapper)
 
