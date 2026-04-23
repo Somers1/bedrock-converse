@@ -112,14 +112,17 @@ class _MantleTransport:
 
     def _convert_assistant(self, content_list):
         openai_msg = {'role': 'assistant'}
-        texts, tool_calls = [], []
+        texts, tool_calls, reasoning = [], [], []
         for c in content_list:
             if c.text: texts.append(c.text)
             elif c.tool_use:
                 tool_calls.append({'id': c.tool_use.tool_use_id, 'type': 'function',
                     'function': {'name': c.tool_use.name, 'arguments': json.dumps(c.tool_use.input) if isinstance(c.tool_use.input, dict) else str(c.tool_use.input)}})
+            elif c.reasoning_content and c.reasoning_content.reasoning_text:
+                reasoning.append(c.reasoning_content.reasoning_text.text)
         if texts: openai_msg['content'] = '\n'.join(texts)
         if tool_calls: openai_msg['tool_calls'] = tool_calls
+        if reasoning: openai_msg['reasoning_content'] = '\n'.join(reasoning)
         return [openai_msg]
 
     def _convert_user(self, content_list):

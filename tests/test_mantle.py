@@ -170,6 +170,19 @@ class TestMantleBuildParams(unittest.TestCase):
         params = m._build_params([Message().add_text("Hi")])
         self.assertEqual(params['reasoning_effort'], 'high')
 
+    def test_assistant_reasoning_forwarded_to_next_call(self):
+        m = Mantle(model_id="moonshotai/kimi-k2", region_name="us-east-1")
+        assistant_msg = Message(role='assistant', content=[
+            MessageContent(reasoning_content=ReasoningContent(
+                reasoning_text=ReasoningText(text='I should call the tool', signature=''))),
+            MessageContent(tool_use=ToolUse(tool_use_id='id1', name='my_tool', input={'k': 'v'})),
+        ])
+        msgs = [Message().add_text('Hi'), assistant_msg, Message().add_text('Continue')]
+        params = m._build_params(msgs)
+        assistant_payload = next(msg for msg in params['messages'] if msg.get('role') == 'assistant')
+        self.assertEqual(assistant_payload['reasoning_content'], 'I should call the tool')
+        self.assertEqual(assistant_payload['tool_calls'][0]['function']['name'], 'my_tool')
+
 
 class TestMantleInvoke(unittest.TestCase):
     def _make_mantle(self, **kwargs):
