@@ -764,6 +764,89 @@ class ConverseResponse(FromDictMixin):
         return ConverseCost(model_id=self.model_id, usage=self.usage)
 
 
+class StreamResponseBuilder:
+    def __init__(self):
+        self.role = "assistant"
+        self.blocks = {}
+        self.block_order = []
+        self.tool_input_buffers = {}
+        self.stop_reason = None
+        self.usage = None
+        self.metrics = None
+        self.trace = None
+        self.performance_config = None
+        self.additional_model_response_fields = None
+
+    def absorb(self, raw_event):
+        if "messageStart" in raw_event:
+            self.role = raw_event["messageStart"].get("role", "assistant")
+            yield {"type": "message_start", "role": self.role}
+        elif "contentBlockStart" in raw_event:
+            evt = raw_event["contentBlockStart"]
+            idx = evt["contentBlockIndex"]
+            start = evt.get("start", {})
+            if "toolUse" in start:
+                tu = start["toolUse"]
+                self.blocks[idx] = {"type": "tool_use", "tool_use_id": tu["toolUseId"], "name": tu["name"], "input_text": ""}
+                self.block_order.append(idx)
+                yield {"type": "content_block_start", "index": idx, "block_type": "tool_use", "tool_use_id": tu["toolUseId"], "name": tu["name"]}
+            else:
+                self.blocks[idx] = {"type": "text", "text": ""}
+                self.block_order.append(idx)
+                yield {"type": "content_block_start", "index": idx, "block_type": "text"}
+        elif "contentBlockDelta" in raw_event:
+            evt = raw_event["contentBlockDelta"]
+            idx = evt["contentBlockIndex"]
+            delta = evt.get("delta", {})
+            if idx not in self.blocks:
+                if "text" in delta:
+                    self.blocks[idx] = {"type": "text", "text": ""}
+                    self.block_order.append(idx)
+                    yield {"type": "content_block_start", "index": idx, "block_type": "text"}
+                elif "toolUse" in delta:
+                    self.blocks[idx] = {"type": "tool_use", "tool_use_id": None, "name": None, "input_text": ""}
+                    self.block_order.append(idx)
+            block = self.blocks[idx]
+            if "text" in delta:
+                block["text"] += delta["text"]
+                yield {"type": "text_delta", "index": idx, "text": delta["text"]}
+            elif "toolUse" in delta:
+                fragment = delta["toolUse"].get("input", "")
+                block["input_text"] += fragment
+                yield {"type": "tool_use_input_delta", "index": idx, "partial_json": fragment}
+            elif "reasoningContent" in delta:
+                yield {"type": "reasoning_delta", "index": idx, "reasoning": delta["reasoningContent"]}
+        elif "contentBlockStop" in raw_event:
+            idx = raw_event["contentBlockStop"]["contentBlockIndex"]
+            yield {"type": "content_block_stop", "index": idx}
+        elif "messageStop" in raw_event:
+            self.stop_reason = raw_event["messageStop"].get("stopReason")
+            yield {"type": "message_stop", "stop_reason": self.stop_reason}
+        elif "metadata" in raw_event:
+            meta = raw_event["metadata"]
+            if "usage" in meta:
+                self.usage = TokenUsage.from_dict(meta["usage"])
+            if "metrics" in meta:
+                self.metrics = ConverseMetrics.from_dict(meta["metrics"])
+            if "trace" in meta:
+                self.trace = ConverseTrace.from_dict(meta["trace"])
+            if "performanceConfig" in meta:
+                self.performance_config = ConversePerformanceConfig.from_dict(meta["performanceConfig"])
+            yield {"type": "metadata", "usage": self.usage, "metrics": self.metrics}
+
+    def build(self):
+        contents = []
+        for idx in self.block_order:
+            block = self.blocks[idx]
+            if block["type"] == "text":
+                contents.append(MessageContent(text=block["text"]))
+            elif block["type"] == "tool_use":
+                input_data = json.loads(block["input_text"]) if block["input_text"] else {}
+                contents.append(MessageContent(tool_use=ToolUse(tool_use_id=block["tool_use_id"], name=block["name"], input=input_data)))
+        message = Message(role=self.role, content=contents)
+        return ConverseResponse(output=ConverseOutput(message=message), stop_reason=self.stop_reason, usage=self.usage, metrics=self.metrics, trace=self.trace, performance_config=self.performance_config)
+
+
 @dataclass
 class Converse(ToDictMixin, FromDictMixin):
     model_id: str
@@ -911,6 +994,44 @@ class Converse(ToDictMixin, FromDictMixin):
         if message:
             self.messages.append(message)
         response = self._get_response()
+        self.messages.append(response.output.message)
+        return self.format_response(response)
+
+    def stream(self, messages=None):
+        for callback in self.callbacks:
+            try:
+                if hasattr(callback, 'on_converse_start'): callback.on_converse_start(self)
+            except Exception as e: logger.warning(f"Callback error: {e}")
+        self.remove_invalid_caching(messages)
+        payload = self.to_dict()
+        if messages:
+            payload['messages'] = [m.to_dict() for m in messages]
+        try:
+            raw = self.client.converse_stream(**payload)
+        except Exception as error:
+            for callback in self.callbacks:
+                try:
+                    if hasattr(callback, 'on_converse_error'): callback.on_converse_error(self, error)
+                except Exception as cb_e: logger.warning(f"Callback error: {cb_e}")
+            raise
+        builder = StreamResponseBuilder()
+        for raw_event in raw['stream']:
+            for normalized in builder.absorb(raw_event):
+                yield normalized
+        response = builder.build()
+        response.model_id = self.model_id
+        for callback in self.callbacks:
+            try:
+                if hasattr(callback, 'on_converse_end'): callback.on_converse_end(response)
+            except Exception as e: logger.warning(f"Callback error: {e}")
+        return response
+
+    def stream_converse(self, message: Message | str = None):
+        if isinstance(message, str):
+            message = Message().add_text(message)
+        if message:
+            self.messages.append(message)
+        response = yield from self.stream()
         self.messages.append(response.output.message)
         return self.format_response(response)
 
@@ -1524,3 +1645,111 @@ class ConverseAgent(Converse):
                 return f'{prefix}:{self.ref_registry[ref_key]}'
             return match.group(0)
         return re.sub(r'(\w+):([\w-]+)', replace_ref, text)
+
+    def stream_run(self, message: Message | str = None, max_iterations=None, first_tool_only=True):
+        max_iterations = max_iterations or self.max_iterations
+        self.ref_registry = {}
+        if self.structured_output:
+            self.bind_exit_tool(self.structured_output)
+        elif self.exit_tool is None and not self._on_text:
+            self.bind_exit_tool(Finish)
+        if isinstance(message, str):
+            message = Message().add_text(message)
+        if message:
+            self.messages.append(message)
+        for cb in self.callbacks:
+            if hasattr(cb, 'on_run_start'):
+                cb.on_run_start(self)
+        for iteration in range(max_iterations):
+            yield {"type": "iteration_start", "iteration": iteration}
+            response = yield from self.stream()
+            if not response.output.message.content:
+                last_content_text = self.messages[-1].content[-1].text
+                logger.error(last_content_text)
+                yield {"type": "done", "result": last_content_text}
+                return self._fire_run_end(last_content_text)
+            has_tools = any(c.tool_use for c in response.output.message.content)
+            if self.suppress_text_during_loop and has_tools:
+                response.output.message.content = [c for c in response.output.message.content if not c.text or c.tool_use]
+            self.messages.append(response.output.message)
+            tool_results = []
+            exit_tool_results = []
+            for content in response.output.message.content:
+                if content.tool_use:
+                    tool_name = content.tool_use.name
+                    tool_input = self.resolve_refs(content.tool_use.input)
+                    tool_use_id = content.tool_use.tool_use_id
+                    yield {"type": "tool_call", "tool_use_id": tool_use_id, "name": tool_name, "input": tool_input}
+                    for cb in self.callbacks:
+                        if hasattr(cb, 'on_tool_start'):
+                            cb.on_tool_start(tool_name, tool_input, tool_use_id)
+                    _tool_start = time.time()
+                    try:
+                        if self.exit_tool and tool_name == self.exit_tool.tool_spec.name:
+                            if self.structured_output:
+                                result = self.structured_output.model_validate(tool_input)
+                            elif tool_name == 'Finish':
+                                result = Finish.model_validate(tool_input).final_response
+                            else:
+                                result = self.tool_registry.execute(tool_name, tool_input)
+                            exit_tool_results.append(result)
+                        else:
+                            tool = self.tool_registry.get_tool(tool_name)
+                            if switch := getattr(tool, '_model_switch', None):
+                                tool_input = self.execute_model_switch(switch, content.tool_use)
+                            result = self.tool_registry.execute(tool_name, tool_input)
+                        result_str = str(result)
+                        result_str = self.extract_refs(result_str)
+                        tool_result = ToolResult(tool_use_id=tool_use_id, content=[ToolResultContent(text=result_str)], status="success")
+                        yield {"type": "tool_result", "tool_use_id": tool_use_id, "name": tool_name, "result": result_str, "status": "success"}
+                        for cb in self.callbacks:
+                            if hasattr(cb, 'on_tool_end'):
+                                cb.on_tool_end(tool_name, tool_input, tool_use_id, result, "success", time.time() - _tool_start)
+                    except Exception as e:
+                        logger.error(f'Failed to call tool {e}', exc_info=True)
+                        tool_result = ToolResult(tool_use_id=tool_use_id, content=[ToolResultContent(text=str(e))], status="error")
+                        yield {"type": "tool_result", "tool_use_id": tool_use_id, "name": tool_name, "result": str(e), "status": "error"}
+                        for cb in self.callbacks:
+                            if hasattr(cb, 'on_tool_end'):
+                                cb.on_tool_end(tool_name, tool_input, tool_use_id, str(e), "error", time.time() - _tool_start)
+                    tool_results.append(tool_result)
+            if not tool_results:
+                text_parts = [c.text for c in response.output.message.content if c.text]
+                if text_parts and self._on_text:
+                    text = '\n'.join(text_parts)
+                    text = self.resolve_message_refs(text)
+                    on_text_result = self._on_text(text)
+                    if on_text_result is not None:
+                        yield {"type": "done", "result": on_text_result}
+                        return self._fire_run_end(on_text_result)
+                text = '\n'.join(text_parts) if text_parts else None
+                if text:
+                    text = self.resolve_message_refs(text)
+                yield {"type": "done", "result": text}
+                return self._fire_run_end(text)
+            if tool_results:
+                tool_message = Message(role="user")
+                for result in tool_results:
+                    tool_message.content.append(MessageContent(tool_result=result))
+                self.messages.append(tool_message)
+            if exit_tool_results:
+                has_errors = any(r.status == "error" for r in tool_results)
+                if not has_errors:
+                    if first_tool_only:
+                        result = exit_tool_results[0]
+                        if self._list_wrapped and hasattr(result, 'items'):
+                            yield {"type": "done", "result": result.items}
+                            return self._fire_run_end(result.items)
+                        yield {"type": "done", "result": result}
+                        return self._fire_run_end(result)
+                    if self._list_wrapped:
+                        unwrapped = [r.items if hasattr(r, 'items') else r for r in exit_tool_results]
+                        yield {"type": "done", "result": unwrapped}
+                        return self._fire_run_end(unwrapped)
+                    yield {"type": "done", "result": exit_tool_results}
+                    return self._fire_run_end(exit_tool_results)
+                else:
+                    logger.warning("Exit tool called but other tools errored — looping back for retry")
+        result = f"Agent reached maximum iterations ({max_iterations}) without calling exit tool"
+        yield {"type": "done", "result": result, "max_iterations_reached": True}
+        return self._fire_run_end(result)
