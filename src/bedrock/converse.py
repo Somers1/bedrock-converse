@@ -764,12 +764,27 @@ class ConverseResponse(FromDictMixin):
         return ConverseCost(model_id=self.model_id, usage=self.usage)
 
 
+class BedrockStreamError(RuntimeError):
+    def __init__(self, event_type, event):
+        self.event_type = event_type
+        self.event = event
+        message = event.get("message") or event.get("originalMessage") or str(event)
+        super().__init__(f"{event_type}: {message}")
+
+
 class StreamResponseBuilder:
+    STREAM_ERROR_EVENTS = {
+        "internalServerException",
+        "modelStreamErrorException",
+        "validationException",
+        "throttlingException",
+        "serviceUnavailableException",
+    }
+
     def __init__(self):
         self.role = "assistant"
         self.blocks = {}
         self.block_order = []
-        self.tool_input_buffers = {}
         self.stop_reason = None
         self.usage = None
         self.metrics = None
@@ -778,6 +793,8 @@ class StreamResponseBuilder:
         self.additional_model_response_fields = None
 
     def absorb(self, raw_event):
+        if error_type := next((key for key in self.STREAM_ERROR_EVENTS if key in raw_event), None):
+            raise BedrockStreamError(error_type, raw_event[error_type])
         if "messageStart" in raw_event:
             self.role = raw_event["messageStart"].get("role", "assistant")
             yield {"type": "message_start", "role": self.role}
@@ -806,6 +823,10 @@ class StreamResponseBuilder:
                 elif "toolUse" in delta:
                     self.blocks[idx] = {"type": "tool_use", "tool_use_id": None, "name": None, "input_text": ""}
                     self.block_order.append(idx)
+                elif "reasoningContent" in delta:
+                    self.blocks[idx] = {"type": "reasoning", "text": "", "signature": None, "redacted_content": None}
+                    self.block_order.append(idx)
+                    yield {"type": "content_block_start", "index": idx, "block_type": "reasoning"}
             block = self.blocks[idx]
             if "text" in delta:
                 block["text"] += delta["text"]
@@ -815,12 +836,18 @@ class StreamResponseBuilder:
                 block["input_text"] += fragment
                 yield {"type": "tool_use_input_delta", "index": idx, "partial_json": fragment}
             elif "reasoningContent" in delta:
-                yield {"type": "reasoning_delta", "index": idx, "reasoning": delta["reasoningContent"]}
+                reasoning = delta["reasoningContent"]
+                block["text"] += reasoning.get("text", "")
+                block["signature"] = reasoning.get("signature", block["signature"])
+                block["redacted_content"] = reasoning.get("redactedContent", block["redacted_content"])
+                yield {"type": "reasoning_delta", "index": idx, "reasoning": reasoning}
         elif "contentBlockStop" in raw_event:
             idx = raw_event["contentBlockStop"]["contentBlockIndex"]
             yield {"type": "content_block_stop", "index": idx}
         elif "messageStop" in raw_event:
-            self.stop_reason = raw_event["messageStop"].get("stopReason")
+            stop = raw_event["messageStop"]
+            self.stop_reason = stop.get("stopReason")
+            self.additional_model_response_fields = stop.get("additionalModelResponseFields")
             yield {"type": "message_stop", "stop_reason": self.stop_reason}
         elif "metadata" in raw_event:
             meta = raw_event["metadata"]
@@ -843,8 +870,11 @@ class StreamResponseBuilder:
             elif block["type"] == "tool_use":
                 input_data = json.loads(block["input_text"]) if block["input_text"] else {}
                 contents.append(MessageContent(tool_use=ToolUse(tool_use_id=block["tool_use_id"], name=block["name"], input=input_data)))
+            elif block["type"] == "reasoning":
+                reasoning_text = ReasoningText(text=block["text"], signature=block["signature"])
+                contents.append(MessageContent(reasoning_content=ReasoningContent(reasoning_text=reasoning_text, redacted_content=block["redacted_content"])))
         message = Message(role=self.role, content=contents)
-        return ConverseResponse(output=ConverseOutput(message=message), stop_reason=self.stop_reason, usage=self.usage, metrics=self.metrics, trace=self.trace, performance_config=self.performance_config)
+        return ConverseResponse(output=ConverseOutput(message=message), stop_reason=self.stop_reason, usage=self.usage, metrics=self.metrics, trace=self.trace, performance_config=self.performance_config, additional_model_response_fields=self.additional_model_response_fields)
 
 
 @dataclass
@@ -909,7 +939,9 @@ class Converse(ToDictMixin, FromDictMixin):
             message = Message().add_text(message)
         return self.messages + [message]
 
-    def invoke(self, message: Message | str):
+    def invoke(self, message: Message | str, stream=False):
+        if stream:
+            return self.stream(self._format_invoke_message(message))
         response = self._get_response(self._format_invoke_message(message))
         return self.format_response(response)
 
@@ -988,11 +1020,13 @@ class Converse(ToDictMixin, FromDictMixin):
             except Exception as e: logger.warning(f"Callback error: {e}")
         return response
 
-    def converse(self, message: Message | str = None):
+    def converse(self, message: Message | str = None, stream=False):
         if isinstance(message, str):
             message = Message().add_text(message)
         if message:
             self.messages.append(message)
+        if stream:
+            return self.stream_converse_response()
         response = self._get_response()
         self.messages.append(response.output.message)
         return self.format_response(response)
@@ -1008,17 +1042,17 @@ class Converse(ToDictMixin, FromDictMixin):
             payload['messages'] = [m.to_dict() for m in messages]
         try:
             raw = self.client.converse_stream(**payload)
+            builder = StreamResponseBuilder()
+            for raw_event in raw['stream']:
+                for normalized in builder.absorb(raw_event):
+                    yield normalized
+            response = builder.build()
         except Exception as error:
             for callback in self.callbacks:
                 try:
                     if hasattr(callback, 'on_converse_error'): callback.on_converse_error(self, error)
                 except Exception as cb_e: logger.warning(f"Callback error: {cb_e}")
             raise
-        builder = StreamResponseBuilder()
-        for raw_event in raw['stream']:
-            for normalized in builder.absorb(raw_event):
-                yield normalized
-        response = builder.build()
         response.model_id = self.model_id
         for callback in self.callbacks:
             try:
@@ -1027,10 +1061,9 @@ class Converse(ToDictMixin, FromDictMixin):
         return response
 
     def stream_converse(self, message: Message | str = None):
-        if isinstance(message, str):
-            message = Message().add_text(message)
-        if message:
-            self.messages.append(message)
+        return self.converse(message, stream=True)
+
+    def stream_converse_response(self):
         response = yield from self.stream()
         self.messages.append(response.output.message)
         return self.format_response(response)
@@ -1202,7 +1235,9 @@ class StructuredConverse(Converse):
         self.backup_model = model
         return self
 
-    def invoke(self, message: Message | str, retries=1, _is_backup=False):
+    def invoke(self, message: Message | str, retries=1, _is_backup=False, stream=False):
+        if stream:
+            return self.stream_invoke(message, retries=retries, _is_backup=_is_backup)
         response = self._get_response(self._format_invoke_message(message))
         try:
             result = self.format_response(response)
@@ -1215,9 +1250,48 @@ class StructuredConverse(Converse):
                     return self._invoke_backup(message, e)
                 raise
             logger.error(e)
-            message.add_text(
-                f'Your last response failed validation. You have {retries} retries left. Please correct the following errors and try again:\n{e}')
-            return self.invoke(message, retries=retries - 1, _is_backup=_is_backup)
+            return self.invoke(self.validation_retry_message(message, e, retries), retries=retries - 1, _is_backup=_is_backup)
+
+    def stream_invoke(self, message: Message | str, retries=1, _is_backup=False):
+        response = yield from self.stream(self._format_invoke_message(message))
+        try:
+            result = self.format_response(response)
+            if result is None:
+                raise ValueError("No structured output in response")
+            return result
+        except (ValidationError, ValueError) as e:
+            if retries <= 0:
+                if self.backup_model and not _is_backup:
+                    return (yield from self._stream_invoke_backup(message, e))
+                raise
+            logger.error(e)
+            return (yield from self.stream_invoke(self.validation_retry_message(message, e, retries), retries=retries - 1, _is_backup=_is_backup))
+
+    def validation_retry_message(self, message, error, retries):
+        if isinstance(message, str):
+            message = Message().add_text(message)
+        message.add_text(
+            f'Your last {self.output_model.__name__} response failed validation. You have {retries} retries left. Please correct the following errors and try again:\n{error}')
+        return message
+
+    def _stream_invoke_backup(self, message: Message | str, error):
+        if isinstance(self.backup_model, str):
+            logger.warning(f"Validation failed on {self.model_id}, falling back to {self.backup_model}")
+            original_model_id = self.model_id
+            self.model_id = self.backup_model
+            try:
+                return (yield from self.stream_invoke(message, retries=1, _is_backup=True))
+            finally:
+                self.model_id = original_model_id
+        backup_model_id = self.backup_model.model_id
+        logger.warning(f"Validation failed on {self.model_id}, falling back to {backup_model_id}")
+        structured_backup = self.backup_model.with_structured_output(
+            self.output_model,
+            force_choice=self.force_choice,
+            skip_add_tool=self.skip_add_tool,
+            first_tool_only=self.first_tool_only
+        )
+        return (yield from structured_backup.stream_invoke(message, retries=1, _is_backup=True))
 
     def _invoke_backup(self, message: Message | str, error):
         """Handle backup model invocation for both string and Converse instance backup models."""
@@ -1527,7 +1601,9 @@ class ConverseAgent(Converse):
             self.ref_registry[match.group(1)] = match.group(2)
         return clean
 
-    def run(self, message: Message | str = None, max_iterations=None, first_tool_only=True):
+    def run(self, message: Message | str = None, max_iterations=None, first_tool_only=True, stream=False):
+        if stream:
+            return self.stream_run(message, max_iterations=max_iterations, first_tool_only=first_tool_only)
         max_iterations = max_iterations or self.max_iterations
         self.ref_registry = {}
 
