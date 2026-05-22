@@ -511,8 +511,20 @@ class ThinkingConfig(ToDictMixin):
     """
     _SKIP_CAMEL_CASE = True  # AWS Bedrock expects snake_case for thinking config
 
-    type: Literal["enabled", "disabled"] = "enabled"
-    budget_tokens: int | str = 1024
+    type: Literal["enabled", "disabled", "adaptive"] = "enabled"
+    budget_tokens: Optional[int | str] = None
+
+
+@dataclass
+class OutputConfig(ToDictMixin):
+    """
+    Output configuration for adaptive thinking models (Claude 4.5+).
+
+    Note: AWS Bedrock API expects snake_case for this config.
+    """
+    _SKIP_CAMEL_CASE = True
+
+    effort: Literal["low", "medium", "high"] = "medium"
 
 
 @dataclass
@@ -525,6 +537,7 @@ class AdditionalModelRequestFields(ToDictMixin):
     _SKIP_CAMEL_CASE = True  # AWS Bedrock expects snake_case
 
     thinking: Optional[ThinkingConfig] = None
+    output_config: Optional[OutputConfig] = None
 
 
 @dataclass
@@ -1145,7 +1158,7 @@ class Converse(ToDictMixin, FromDictMixin):
         return (
             self.additional_model_request_fields is not None
             and self.additional_model_request_fields.thinking is not None
-            and self.additional_model_request_fields.thinking.type == "enabled"
+            and self.additional_model_request_fields.thinking.type in ("enabled", "adaptive")
         )
 
     def with_thinking(self, tokens: int | str = 1024, enabled: bool = True):
@@ -1163,6 +1176,17 @@ class Converse(ToDictMixin, FromDictMixin):
                 self.inference_config = ConverseInferenceConfig()
             self.inference_config.temperature = 1
             self.inference_config.top_p = None
+        return self
+
+    def with_adaptive_thinking(self, effort: Literal["low", "medium", "high"] = "medium"):
+        if self.additional_model_request_fields is None:
+            self.additional_model_request_fields = AdditionalModelRequestFields()
+        self.additional_model_request_fields.thinking = ThinkingConfig(type="adaptive")
+        self.additional_model_request_fields.output_config = OutputConfig(effort=effort)
+        if self.inference_config is None:
+            self.inference_config = ConverseInferenceConfig()
+        self.inference_config.temperature = 1
+        self.inference_config.top_p = None
         return self
 
     @property
