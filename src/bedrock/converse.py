@@ -820,10 +820,6 @@ class StreamResponseBuilder:
                 self.blocks[idx] = {"type": "tool_use", "tool_use_id": tu["toolUseId"], "name": tu["name"], "input_text": ""}
                 self.block_order.append(idx)
                 yield {"type": "content_block_start", "index": idx, "block_type": "tool_use", "tool_use_id": tu["toolUseId"], "name": tu["name"]}
-            else:
-                self.blocks[idx] = {"type": "text", "text": ""}
-                self.block_order.append(idx)
-                yield {"type": "content_block_start", "index": idx, "block_type": "text"}
         elif "contentBlockDelta" in raw_event:
             evt = raw_event["contentBlockDelta"]
             idx = evt["contentBlockIndex"]
@@ -833,6 +829,10 @@ class StreamResponseBuilder:
                     self.blocks[idx] = {"type": "text", "text": ""}
                     self.block_order.append(idx)
                     yield {"type": "content_block_start", "index": idx, "block_type": "text"}
+                elif "reasoningContent" in delta:
+                    self.blocks[idx] = {"type": "reasoning", "text": ""}
+                    self.block_order.append(idx)
+                    yield {"type": "content_block_start", "index": idx, "block_type": "reasoning"}
                 elif "toolUse" in delta:
                     self.blocks[idx] = {"type": "tool_use", "tool_use_id": None, "name": None, "input_text": ""}
                     self.block_order.append(idx)
