@@ -830,16 +830,12 @@ class StreamResponseBuilder:
                     self.block_order.append(idx)
                     yield {"type": "content_block_start", "index": idx, "block_type": "text"}
                 elif "reasoningContent" in delta:
-                    self.blocks[idx] = {"type": "reasoning", "text": ""}
+                    self.blocks[idx] = {"type": "reasoning", "text": "", "signature": None, "redacted_content": None}
                     self.block_order.append(idx)
                     yield {"type": "content_block_start", "index": idx, "block_type": "reasoning"}
                 elif "toolUse" in delta:
                     self.blocks[idx] = {"type": "tool_use", "tool_use_id": None, "name": None, "input_text": ""}
                     self.block_order.append(idx)
-                elif "reasoningContent" in delta:
-                    self.blocks[idx] = {"type": "reasoning", "text": "", "signature": None, "redacted_content": None}
-                    self.block_order.append(idx)
-                    yield {"type": "content_block_start", "index": idx, "block_type": "reasoning"}
             block = self.blocks[idx]
             if "text" in delta:
                 block["text"] += delta["text"]
