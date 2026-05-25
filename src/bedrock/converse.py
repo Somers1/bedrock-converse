@@ -513,6 +513,7 @@ class ThinkingConfig(ToDictMixin):
 
     type: Literal["enabled", "disabled", "adaptive"] = "enabled"
     budget_tokens: Optional[int | str] = None
+    display: Optional[Literal["summarized", "omitted"]] = None
 
 
 @dataclass
@@ -815,6 +816,8 @@ class StreamResponseBuilder:
             evt = raw_event["contentBlockStart"]
             idx = evt["contentBlockIndex"]
             start = evt.get("start", {})
+            if not start:
+                logger.debug("bedrock_stream_empty_content_block_start index=%s", idx)
             if "toolUse" in start:
                 tu = start["toolUse"]
                 self.blocks[idx] = {"type": "tool_use", "tool_use_id": tu["toolUseId"], "name": tu["name"], "input_text": ""}
@@ -824,6 +827,9 @@ class StreamResponseBuilder:
             evt = raw_event["contentBlockDelta"]
             idx = evt["contentBlockIndex"]
             delta = evt.get("delta", {})
+            if "reasoningContent" in delta:
+                reasoning = delta["reasoningContent"]
+                logger.info("bedrock_stream_reasoning_delta_raw index=%s chars=%s has_signature=%s", idx, len(reasoning.get("text", "")), bool(reasoning.get("signature")))
             if idx not in self.blocks:
                 if "text" in delta:
                     self.blocks[idx] = {"type": "text", "text": ""}
@@ -832,6 +838,7 @@ class StreamResponseBuilder:
                 elif "reasoningContent" in delta:
                     self.blocks[idx] = {"type": "reasoning", "text": "", "signature": None, "redacted_content": None}
                     self.block_order.append(idx)
+                    logger.info("bedrock_stream_reasoning_start index=%s", idx)
                     yield {"type": "content_block_start", "index": idx, "block_type": "reasoning"}
                 elif "toolUse" in delta:
                     self.blocks[idx] = {"type": "tool_use", "tool_use_id": None, "name": None, "input_text": ""}
@@ -1174,10 +1181,10 @@ class Converse(ToDictMixin, FromDictMixin):
             self.inference_config.top_p = None
         return self
 
-    def with_adaptive_thinking(self, effort: Literal["low", "medium", "high"] = "medium"):
+    def with_adaptive_thinking(self, effort: Literal["low", "medium", "high"] = "medium", display: Literal["summarized", "omitted"] = "summarized"):
         if self.additional_model_request_fields is None:
             self.additional_model_request_fields = AdditionalModelRequestFields()
-        self.additional_model_request_fields.thinking = ThinkingConfig(type="adaptive")
+        self.additional_model_request_fields.thinking = ThinkingConfig(type="adaptive", display=display)
         self.additional_model_request_fields.output_config = OutputConfig(effort=effort)
         if self.inference_config is None:
             self.inference_config = ConverseInferenceConfig()
