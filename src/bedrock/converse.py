@@ -724,6 +724,7 @@ class ConverseCost:
         ModelCost(model_name='amazon.nova-lite', input=0.00006, output=0.00024),
         ModelCost(model_name='gemini-2.0-flash-001', input=0.0001, output=0.0004),
         ModelCost(model_name='llama4-maverick', input=0.00024, output=0.00097),
+        ModelCost(model_name='kimi-k2.5', input=0.0006, output=0.003, cached_write=0.0006, cached_read=0.0001),
         ModelCost(model_name='kimi', input=0.0006, output=0.0025, cached_write=0.0006, cached_read=0.0001),
         ModelCost(model_name='glm-5', input=0.001, output=0.0032, cached_write=0.001, cached_read=0.0002),
     ]
