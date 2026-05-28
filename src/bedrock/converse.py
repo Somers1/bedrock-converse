@@ -640,12 +640,19 @@ class ConverseOutput(FromDictMixin):
 
 
 @dataclass
+class CacheDetail(FromDictMixin):
+    input_tokens: int = 0
+    ttl: Literal["5m", "1h"] = "5m"
+
+
+@dataclass
 class TokenUsage(FromDictMixin):
     input_tokens: int = 0
     output_tokens: int = 0
     total_tokens: int = 0
     cache_read_input_tokens: int = 0
     cache_write_input_tokens: int = 0
+    cache_details: List[CacheDetail] = field(default_factory=list)
 
     def __str__(self):
         return (f"input_tokens: {self.input_tokens}"
@@ -726,7 +733,7 @@ class ConverseCost:
                 f"\noutput_cost: {self.output_cost}"
                 f"\ntotal_cost: {self.total_cost}"
                 f"\ncached_read_cost: {self.cached_read_cost}"
-                f"\ncached_read_cost: {self.cached_read_cost}")
+                f"\ncached_write_cost: {self.cached_write_cost}")
 
     @cached_property
     def cost(self):
@@ -737,8 +744,7 @@ class ConverseCost:
 
     @property
     def input_cost(self):
-        non_cached = self.usage.input_tokens - self.usage.cache_read_input_tokens - self.usage.cache_write_input_tokens
-        return self.cost.input * max(non_cached, 0) / 1000
+        return self.cost.input * self.usage.input_tokens / 1000
 
     @property
     def output_cost(self):
