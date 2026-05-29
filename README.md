@@ -259,6 +259,18 @@ entities = agent.run("Extract entities from: 'John works at Google in Sydney'")
 # [Entity(name="John", type="person"), Entity(name="Google", type="org"), ...]
 ```
 
+### Prompt caching across the loop
+
+A single agent turn makes one Bedrock call per tool iteration, each re-sending the system prompt, tools, and the whole growing message history. `with_prompt_caching()` adds rolling cache points so that stable content is written once and read cheaply on every subsequent call:
+
+```python
+agent = ConverseAgent(model_id="us.anthropic.claude-sonnet-4-20250514-v1:0", region_name="us-east-1")
+agent.bind_tools([search, calculate])
+agent.with_prompt_caching()  # message_ttl="5m", static_ttl="1h"
+```
+
+The system prompt, tools, and the turn's opening user message are cached at `static_ttl` (stable for the whole turn and across rapid follow-ups). The tool-call tail that grows during the loop rolls at `message_ttl`, leapfrogging so each call reads the previous iteration's prefix. Cache points are injected into the request payload only — your `Message` objects are never mutated, so persisted history stays clean. Unsupported models are skipped automatically.
+
 ### How the loop works
 
 ```

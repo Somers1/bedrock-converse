@@ -983,10 +983,7 @@ class Converse(ToDictMixin, FromDictMixin):
         for callback in self.callbacks:
             try: callback.on_converse_start(self)
             except Exception as e: logger.warning(f"Callback error: {e}")
-        self.remove_invalid_caching(messages)
-        payload = self.to_dict()
-        if messages:
-            payload['messages'] = [m.to_dict() for m in messages]
+        payload = self.build_payload(messages)
         try:
             response = ConverseResponse.from_dict(self.client.converse(**payload))
         except Exception as error:
@@ -1003,8 +1000,19 @@ class Converse(ToDictMixin, FromDictMixin):
             except Exception as e: logger.warning(f"Callback error: {e}")
         return response
 
+    @property
+    def caching_supported(self):
+        return any(model in self.model_id.lower() for model in self.CACHE_SUPPORTED_MODELS)
+
+    def build_payload(self, messages):
+        self.remove_invalid_caching(messages)
+        payload = self.to_dict()
+        if messages:
+            payload['messages'] = [m.to_dict() for m in messages]
+        return payload
+
     def remove_invalid_caching(self, messages):
-        if not any(model in self.model_id.lower() for model in self.CACHE_SUPPORTED_MODELS):
+        if not self.caching_supported:
             logger.warning(f'Removing caching since {self.model_id} does not support it.')
             for message in self.messages:
                 message.content = [content for content in message.content if not content.cache_point]
@@ -1021,10 +1029,7 @@ class Converse(ToDictMixin, FromDictMixin):
                 if hasattr(callback, 'on_converse_start'): callback.on_converse_start(self)
             except Exception as e: logger.warning(f"Callback error: {e}")
         loop = asyncio.get_event_loop()
-        self.remove_invalid_caching(messages)
-        payload = self.to_dict()
-        if messages:
-            payload['messages'] = [m.to_dict() for m in messages]
+        payload = self.build_payload(messages)
         try:
             response_dict = await loop.run_in_executor(None, lambda: self.client.converse(**payload))
         except Exception as error:
@@ -1059,10 +1064,7 @@ class Converse(ToDictMixin, FromDictMixin):
             try:
                 if hasattr(callback, 'on_converse_start'): callback.on_converse_start(self)
             except Exception as e: logger.warning(f"Callback error: {e}")
-        self.remove_invalid_caching(messages)
-        payload = self.to_dict()
-        if messages:
-            payload['messages'] = [m.to_dict() for m in messages]
+        payload = self.build_payload(messages)
         try:
             raw = self.client.converse_stream(**payload)
             builder = StreamResponseBuilder()
@@ -1495,9 +1497,48 @@ class ConverseAgent(Converse):
     # own text. With this enabled, text is stripped from mixed text+tool responses — the model can
     # only communicate via tools during the loop. Text-only responses still work as the exit signal.
     suppress_text_during_loop: bool = True
+    prompt_caching: bool = False
+    cache_static_ttl: str = "1h"
+    cache_message_ttl: str = "5m"
 
     def __post_init__(self):
-        super()._TO_DICT_EXCLUSIONS.extend(['max_iterations', 'exit_tool', 'structured_output', 'debug', '_list_wrapped', '_on_text', 'suppress_text_during_loop', 'ref_registry'])
+        super()._TO_DICT_EXCLUSIONS.extend(['max_iterations', 'exit_tool', 'structured_output', 'debug', '_list_wrapped', '_on_text', 'suppress_text_during_loop', 'ref_registry', 'prompt_caching', 'cache_static_ttl', 'cache_message_ttl'])
+
+    def with_prompt_caching(self, message_ttl="5m", static_ttl="1h"):
+        self.prompt_caching = True
+        self.cache_message_ttl = message_ttl
+        self.cache_static_ttl = static_ttl
+        return self
+
+    def build_payload(self, messages):
+        payload = super().build_payload(messages)
+        if self.prompt_caching and self.caching_supported:
+            self.cache_static_prefix(payload)
+            self.cache_rolling_messages(payload.get('messages') or [])
+        return payload
+
+    def cache_static_prefix(self, payload):
+        if system := payload.get('system'):
+            return system.append(self.cache_block(self.cache_static_ttl))
+        if tools := payload.get('toolConfig', {}).get('tools'):
+            tools.append(self.cache_block(self.cache_static_ttl))
+
+    def cache_rolling_messages(self, messages):
+        if not messages:
+            return
+        last = len(messages) - 1
+        if getattr(self, '_cache_anchor', None) is None:
+            self._cache_anchor = last
+        points = {self._cache_anchor: self.cache_static_ttl}
+        for index in (getattr(self, '_cache_previous', None), last):
+            if index is not None and index != self._cache_anchor:
+                points[index] = self.cache_message_ttl
+        for index, ttl in points.items():
+            messages[index]['content'].append(self.cache_block(ttl))
+        self._cache_previous = last
+
+    def cache_block(self, ttl):
+        return MessageContent(cache_point=CachePoint(ttl=ttl)).to_dict()
 
     def on_text(self, hook: callable):
         """Register a hook called when the agent responds with text instead of tools.
