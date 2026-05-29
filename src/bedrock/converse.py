@@ -9,6 +9,7 @@ import re
 import time
 import typing
 import uuid
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, fields
 from dataclasses import field
 from datetime import datetime
@@ -627,6 +628,13 @@ class Message(ToDictMixin, FromDictMixin):
         for content in self.content:
             if content.text:
                 content.text = content.text.replace('\n', ' ').replace('\r', ' ')
+
+    def to_dict(self):
+        token = (id(self.content), len(self.content))
+        if getattr(self, '_dict_token', None) != token:
+            self._dict_cache = super().to_dict()
+            self._dict_token = token
+        return {**self._dict_cache, 'content': list(self._dict_cache['content'])}
 
 
 @dataclass
@@ -1501,8 +1509,16 @@ class ConverseAgent(Converse):
     cache_static_ttl: str = "1h"
     cache_message_ttl: str = "5m"
 
+    # When set, tool calls the model emits together in one turn run concurrently on a thread pool
+    # instead of one-after-another. Ref resolution, the exit tool, and model-switch tools stay serial
+    # on the main thread, so the ref registry and message history are never touched off-thread.
+    parallel_tools: bool = False
+    # Optional (fn) -> result wrapper applied around each pooled tool body, for callers that need
+    # per-thread setup/teardown (e.g. closing a thread-local DB connection). Default runs fn directly.
+    tool_thread_hook: Optional[Callable] = None
+
     def __post_init__(self):
-        super()._TO_DICT_EXCLUSIONS.extend(['max_iterations', 'exit_tool', 'structured_output', 'debug', '_list_wrapped', '_on_text', 'suppress_text_during_loop', 'ref_registry', 'prompt_caching', 'cache_static_ttl', 'cache_message_ttl'])
+        super()._TO_DICT_EXCLUSIONS.extend(['max_iterations', 'exit_tool', 'structured_output', 'debug', '_list_wrapped', '_on_text', 'suppress_text_during_loop', 'ref_registry', 'prompt_caching', 'cache_static_ttl', 'cache_message_ttl', 'parallel_tools', 'tool_thread_hook'])
 
     def with_prompt_caching(self, message_ttl="5m", static_ttl="1h"):
         self.prompt_caching = True
@@ -1679,125 +1695,14 @@ class ConverseAgent(Converse):
     def run(self, message: Message | str = None, max_iterations=None, first_tool_only=True, stream=False):
         if stream:
             return self.stream_run(message, max_iterations=max_iterations, first_tool_only=first_tool_only)
-        max_iterations = max_iterations or self.max_iterations
-        self.ref_registry = {}
+        loop = self.run_loop(message, max_iterations=max_iterations, first_tool_only=first_tool_only, streaming=False)
+        try:
+            while True:
+                next(loop)
+        except StopIteration as stop:
+            return stop.value
 
-        if self.structured_output:
-            self.bind_exit_tool(self.structured_output)
-        elif self.exit_tool is None and not self._on_text:
-            self.bind_exit_tool(Finish)
-
-        if isinstance(message, str):
-            message = Message().add_text(message)
-        if message:
-            self.messages.append(message)
-        for cb in self.callbacks:
-            if hasattr(cb, 'on_run_start'):
-                cb.on_run_start(self)
-        for iteration in range(max_iterations):
-            response = self._get_response()
-            if not response.output.message.content:
-                last_content_text = self.messages[-1].content[-1].text
-                logger.error(last_content_text)
-                return self._fire_run_end(last_content_text)
-            # Strip text from mixed text+tool responses to prevent hallucinated user replies
-            has_tools = any(c.tool_use for c in response.output.message.content)
-            if self.suppress_text_during_loop and has_tools:
-                response.output.message.content = [c for c in response.output.message.content if not c.text or c.tool_use]
-            self.messages.append(response.output.message)
-            tool_results = []
-            exit_tool_results = []
-            for content in response.output.message.content:
-                if content.tool_use:
-                    tool_name = content.tool_use.name
-                    tool_input = self.resolve_refs(content.tool_use.input)
-                    tool_use_id = content.tool_use.tool_use_id
-                    if self.debug:
-                        logger.warning(f'Called {tool_name} for {tool_input}')
-                    for cb in self.callbacks:
-                        if hasattr(cb, 'on_tool_start'):
-                            cb.on_tool_start(tool_name, tool_input, tool_use_id)
-                    _tool_start = time.time()
-                    try:
-                        if self.exit_tool and tool_name == self.exit_tool.tool_spec.name:
-                            if self.structured_output:
-                                result = self.structured_output.model_validate(tool_input)
-                            elif tool_name == 'Finish':
-                                result = Finish.model_validate(tool_input).final_response
-                            else:
-                                result = self.tool_registry.execute(tool_name, tool_input)
-                            exit_tool_results.append(result)
-                        else:
-                            tool = self.tool_registry.get_tool(tool_name)
-                            if switch := getattr(tool, '_model_switch', None):
-                                tool_input = self.execute_model_switch(switch, content.tool_use)
-                            result = self.tool_registry.execute(tool_name, tool_input)
-                        result_str = str(result)
-                        result_str = self.extract_refs(result_str)
-                        tool_result = ToolResult(
-                            tool_use_id=tool_use_id,
-                            content=[ToolResultContent(text=result_str)],
-                            status="success"
-                        )
-                        for cb in self.callbacks:
-                            if hasattr(cb, 'on_tool_end'):
-                                cb.on_tool_end(tool_name, tool_input, tool_use_id, result, "success", time.time() - _tool_start)
-                    except Exception as e:
-                        logger.error(f'Failed to call tool {e}', exc_info=True)
-                        tool_result = ToolResult(
-                            tool_use_id=tool_use_id,
-                            content=[ToolResultContent(text=str(e))],
-                            status="error"
-                        )
-                        for cb in self.callbacks:
-                            if hasattr(cb, 'on_tool_end'):
-                                cb.on_tool_end(tool_name, tool_input, tool_use_id, str(e), "error", time.time() - _tool_start)
-                    tool_results.append(tool_result)
-            # If no tools were called, fire on_text or return the text directly
-            # This prevents the loop from continuing with an assistant message at the end,
-            # which causes "must end with user message" errors on the next API call
-            if not tool_results:
-                text_parts = [c.text for c in response.output.message.content if c.text]
-                if text_parts and self._on_text:
-                    text = '\n'.join(text_parts)
-                    text = self.resolve_message_refs(text)
-                    on_text_result = self._on_text(text)
-                    if on_text_result is not None:
-                        return self._fire_run_end(on_text_result)
-                text = '\n'.join(text_parts) if text_parts else None
-                if text:
-                    text = self.resolve_message_refs(text)
-                return self._fire_run_end(text)
-            if tool_results:
-                tool_message = Message(role="user")
-                for result in tool_results:
-                    tool_message.content.append(MessageContent(tool_result=result))
-                self.messages.append(tool_message)
-            if exit_tool_results:
-                # If any non-exit tool errored, loop back so the model sees the failure
-                has_errors = any(r.status == "error" for r in tool_results)
-                if not has_errors:
-                    if first_tool_only:
-                        result = exit_tool_results[0]
-                        if self._list_wrapped and hasattr(result, 'items'):
-                            return self._fire_run_end(result.items)
-                        return self._fire_run_end(result)
-                    if self._list_wrapped:
-                        return self._fire_run_end([r.items if hasattr(r, 'items') else r for r in exit_tool_results])
-                    return self._fire_run_end(exit_tool_results)
-                else:
-                    logger.warning("Exit tool called but other tools errored — looping back for retry")
-        return self._fire_run_end(f"Agent reached maximum iterations ({max_iterations}) without calling exit tool")
-
-    def resolve_message_refs(self, text):
-        def replace_ref(match):
-            prefix, ref_key = match.group(1), match.group(2)
-            if ref_key in self.ref_registry:
-                return f'{prefix}:{self.ref_registry[ref_key]}'
-            return match.group(0)
-        return re.sub(r'(\w+):([\w-]+)', replace_ref, text)
-
-    def stream_run(self, message: Message | str = None, max_iterations=None, first_tool_only=True):
+    def run_loop(self, message=None, max_iterations=None, first_tool_only=True, streaming=False):
         max_iterations = max_iterations or self.max_iterations
         self.ref_registry = {}
         if self.structured_output:
@@ -1813,7 +1718,7 @@ class ConverseAgent(Converse):
                 cb.on_run_start(self)
         for iteration in range(max_iterations):
             yield {"type": "iteration_start", "iteration": iteration}
-            response = yield from self.stream()
+            response = (yield from self.stream()) if streaming else self._get_response()
             if not response.output.message.content:
                 last_content_text = self.messages[-1].content[-1].text
                 logger.error(last_content_text)
@@ -1823,84 +1728,150 @@ class ConverseAgent(Converse):
             if self.suppress_text_during_loop and has_tools:
                 response.output.message.content = [c for c in response.output.message.content if not c.text or c.tool_use]
             self.messages.append(response.output.message)
-            tool_results = []
-            exit_tool_results = []
-            for content in response.output.message.content:
-                if content.tool_use:
-                    tool_name = content.tool_use.name
-                    tool_input = self.resolve_refs(content.tool_use.input)
-                    tool_use_id = content.tool_use.tool_use_id
-                    yield {"type": "tool_call", "tool_use_id": tool_use_id, "name": tool_name, "input": tool_input}
-                    for cb in self.callbacks:
-                        if hasattr(cb, 'on_tool_start'):
-                            cb.on_tool_start(tool_name, tool_input, tool_use_id)
-                    _tool_start = time.time()
-                    try:
-                        if self.exit_tool and tool_name == self.exit_tool.tool_spec.name:
-                            if self.structured_output:
-                                result = self.structured_output.model_validate(tool_input)
-                            elif tool_name == 'Finish':
-                                result = Finish.model_validate(tool_input).final_response
-                            else:
-                                result = self.tool_registry.execute(tool_name, tool_input)
-                            exit_tool_results.append(result)
-                        else:
-                            tool = self.tool_registry.get_tool(tool_name)
-                            if switch := getattr(tool, '_model_switch', None):
-                                tool_input = self.execute_model_switch(switch, content.tool_use)
-                            result = self.tool_registry.execute(tool_name, tool_input)
-                        result_str = str(result)
-                        result_str = self.extract_refs(result_str)
-                        tool_result = ToolResult(tool_use_id=tool_use_id, content=[ToolResultContent(text=result_str)], status="success")
-                        yield {"type": "tool_result", "tool_use_id": tool_use_id, "name": tool_name, "result": result_str, "status": "success"}
-                        for cb in self.callbacks:
-                            if hasattr(cb, 'on_tool_end'):
-                                cb.on_tool_end(tool_name, tool_input, tool_use_id, result, "success", time.time() - _tool_start)
-                    except Exception as e:
-                        logger.error(f'Failed to call tool {e}', exc_info=True)
-                        tool_result = ToolResult(tool_use_id=tool_use_id, content=[ToolResultContent(text=str(e))], status="error")
-                        yield {"type": "tool_result", "tool_use_id": tool_use_id, "name": tool_name, "result": str(e), "status": "error"}
-                        for cb in self.callbacks:
-                            if hasattr(cb, 'on_tool_end'):
-                                cb.on_tool_end(tool_name, tool_input, tool_use_id, str(e), "error", time.time() - _tool_start)
-                    tool_results.append(tool_result)
+            tool_results, exit_tool_results = yield from self.execute_tool_uses(response.output.message.content)
             if not tool_results:
+                # Returning text ends the loop; a trailing assistant message would trigger
+                # "must end with user message" on the next API call.
                 text_parts = [c.text for c in response.output.message.content if c.text]
                 if text_parts and self._on_text:
-                    text = '\n'.join(text_parts)
-                    text = self.resolve_message_refs(text)
-                    on_text_result = self._on_text(text)
-                    if on_text_result is not None:
+                    text = self.resolve_message_refs('\n'.join(text_parts))
+                    if (on_text_result := self._on_text(text)) is not None:
                         yield {"type": "done", "result": on_text_result}
                         return self._fire_run_end(on_text_result)
-                text = '\n'.join(text_parts) if text_parts else None
-                if text:
-                    text = self.resolve_message_refs(text)
+                text = self.resolve_message_refs('\n'.join(text_parts)) if text_parts else None
                 yield {"type": "done", "result": text}
                 return self._fire_run_end(text)
-            if tool_results:
-                tool_message = Message(role="user")
-                for result in tool_results:
-                    tool_message.content.append(MessageContent(tool_result=result))
-                self.messages.append(tool_message)
+            tool_message = Message(role="user")
+            for result in tool_results:
+                tool_message.content.append(MessageContent(tool_result=result))
+            self.messages.append(tool_message)
             if exit_tool_results:
-                has_errors = any(r.status == "error" for r in tool_results)
-                if not has_errors:
-                    if first_tool_only:
-                        result = exit_tool_results[0]
-                        if self._list_wrapped and hasattr(result, 'items'):
-                            yield {"type": "done", "result": result.items}
-                            return self._fire_run_end(result.items)
-                        yield {"type": "done", "result": result}
-                        return self._fire_run_end(result)
-                    if self._list_wrapped:
-                        unwrapped = [r.items if hasattr(r, 'items') else r for r in exit_tool_results]
-                        yield {"type": "done", "result": unwrapped}
-                        return self._fire_run_end(unwrapped)
-                    yield {"type": "done", "result": exit_tool_results}
-                    return self._fire_run_end(exit_tool_results)
-                else:
+                if any(r.status == "error" for r in tool_results):
                     logger.warning("Exit tool called but other tools errored — looping back for retry")
+                    continue
+                result = self.finalize_exit(exit_tool_results, first_tool_only)
+                yield {"type": "done", "result": result}
+                return self._fire_run_end(result)
         result = f"Agent reached maximum iterations ({max_iterations}) without calling exit tool"
         yield {"type": "done", "result": result, "max_iterations_reached": True}
+        return self._fire_run_end(result)
+
+    def execute_tool_uses(self, contents):
+        tool_uses = [content.tool_use for content in contents if content.tool_use]
+        if self.parallel_tools and len(tool_uses) > 1:
+            return (yield from self.execute_tool_uses_parallel(tool_uses))
+        return (yield from self.execute_tool_uses_serial(tool_uses))
+
+    def execute_tool_uses_serial(self, tool_uses):
+        tool_results = []
+        exit_tool_results = []
+        for tool_use in tool_uses:
+            tool_input = yield from self.announce_tool_call(tool_use)
+            outcome = self.run_one_tool(tool_use, tool_input)
+            yield from self.collect_outcome(tool_use, outcome, tool_results, exit_tool_results)
+        return tool_results, exit_tool_results
+
+    def execute_tool_uses_parallel(self, tool_uses):
+        calls = []
+        for tool_use in tool_uses:
+            tool_input = yield from self.announce_tool_call(tool_use)
+            calls.append((tool_use, tool_input))
+        pooled = [(tool_use, tool_input) for tool_use, tool_input in calls if self.is_parallel_safe(tool_use)]
+        serial = [(tool_use, tool_input) for tool_use, tool_input in calls if not self.is_parallel_safe(tool_use)]
+        outcomes = {}
+        with ThreadPoolExecutor(max_workers=len(pooled) or 1) as pool:
+            futures = {pool.submit(self.run_one_tool_threaded, tool_use, tool_input): tool_use.tool_use_id for tool_use, tool_input in pooled}
+            for tool_use, tool_input in serial:
+                outcomes[tool_use.tool_use_id] = self.run_one_tool(tool_use, tool_input)
+            for future in as_completed(futures):
+                outcomes[futures[future]] = future.result()
+        tool_results = []
+        exit_tool_results = []
+        for tool_use, tool_input in calls:
+            yield from self.collect_outcome(tool_use, outcomes[tool_use.tool_use_id], tool_results, exit_tool_results)
+        return tool_results, exit_tool_results
+
+    def announce_tool_call(self, tool_use):
+        tool_input = self.resolve_refs(tool_use.input)
+        yield {"type": "tool_call", "tool_use_id": tool_use.tool_use_id, "name": tool_use.name, "input": tool_input}
+        if self.debug:
+            logger.warning(f'Called {tool_use.name} for {tool_input}')
+        for cb in self.callbacks:
+            if hasattr(cb, 'on_tool_start'):
+                cb.on_tool_start(tool_use.name, tool_input, tool_use.tool_use_id)
+        return tool_input
+
+    def collect_outcome(self, tool_use, outcome, tool_results, exit_tool_results):
+        result, exc, elapsed, used_input, is_exit = outcome
+        tool_result, event = self.build_tool_result(tool_use, result, exc)
+        tool_results.append(tool_result)
+        yield event
+        if is_exit and exc is None:
+            exit_tool_results.append(result)
+        self.fire_tool_end(tool_use.name, used_input, tool_use.tool_use_id, result if exc is None else str(exc), "error" if exc else "success", elapsed)
+
+    def is_parallel_safe(self, tool_use):
+        if self.is_exit_tool(tool_use.name):
+            return False
+        return getattr(self.tool_registry.get_tool(tool_use.name), '_model_switch', None) is None
+
+    def run_one_tool(self, tool_use, tool_input):
+        start = time.time()
+        try:
+            if self.is_exit_tool(tool_use.name):
+                return self.invoke_exit_tool(tool_use.name, tool_input), None, time.time() - start, tool_input, True
+            tool = self.tool_registry.get_tool(tool_use.name)
+            if switch := getattr(tool, '_model_switch', None):
+                tool_input = self.execute_model_switch(switch, tool_use)
+            return self.tool_registry.execute(tool_use.name, tool_input), None, time.time() - start, tool_input, False
+        except Exception as e:
+            return None, e, time.time() - start, tool_input, False
+
+    def run_one_tool_threaded(self, tool_use, tool_input):
+        if self.tool_thread_hook:
+            return self.tool_thread_hook(lambda: self.run_one_tool(tool_use, tool_input))
+        return self.run_one_tool(tool_use, tool_input)
+
+    def build_tool_result(self, tool_use, result, exc):
+        if exc is None:
+            result_str = self.extract_refs(str(result))
+            tool_result = ToolResult(tool_use_id=tool_use.tool_use_id, content=[ToolResultContent(text=result_str)], status="success")
+            return tool_result, {"type": "tool_result", "tool_use_id": tool_use.tool_use_id, "name": tool_use.name, "result": result_str, "status": "success"}
+        logger.error(f'Failed to call tool {exc}', exc_info=exc)
+        tool_result = ToolResult(tool_use_id=tool_use.tool_use_id, content=[ToolResultContent(text=str(exc))], status="error")
+        return tool_result, {"type": "tool_result", "tool_use_id": tool_use.tool_use_id, "name": tool_use.name, "result": str(exc), "status": "error"}
+
+    def is_exit_tool(self, tool_name):
+        return bool(self.exit_tool) and tool_name == self.exit_tool.tool_spec.name
+
+    def invoke_exit_tool(self, tool_name, tool_input):
+        if self.structured_output:
+            return self.structured_output.model_validate(tool_input)
+        if tool_name == 'Finish':
+            return Finish.model_validate(tool_input).final_response
+        return self.tool_registry.execute(tool_name, tool_input)
+
+    def fire_tool_end(self, tool_name, tool_input, tool_use_id, result, status, elapsed):
+        for cb in self.callbacks:
+            if hasattr(cb, 'on_tool_end'):
+                cb.on_tool_end(tool_name, tool_input, tool_use_id, result, status, elapsed)
+
+    def finalize_exit(self, exit_tool_results, first_tool_only):
+        if first_tool_only:
+            result = exit_tool_results[0]
+            return result.items if self._list_wrapped and hasattr(result, 'items') else result
+        if self._list_wrapped:
+            return [r.items if hasattr(r, 'items') else r for r in exit_tool_results]
+        return exit_tool_results
+
+    def resolve_message_refs(self, text):
+        def replace_ref(match):
+            prefix, ref_key = match.group(1), match.group(2)
+            if ref_key in self.ref_registry:
+                return f'{prefix}:{self.ref_registry[ref_key]}'
+            return match.group(0)
+        return re.sub(r'(\w+):([\w-]+)', replace_ref, text)
+
+    def stream_run(self, message: Message | str = None, max_iterations=None, first_tool_only=True):
+        return self.run_loop(message, max_iterations=max_iterations, first_tool_only=first_tool_only, streaming=True)
         return self._fire_run_end(result)

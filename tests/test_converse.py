@@ -3,6 +3,7 @@ import io
 import json
 import os
 import sys
+import threading
 import time
 import unittest
 from dataclasses import dataclass
@@ -62,6 +63,24 @@ def _make_response_dict(text="Hello", stop_reason="end_turn",
                   "cacheReadInputTokens": 0, "cacheWriteInputTokens": 0},
         "metrics": {"latencyMs": latency_ms},
     }
+
+
+def _make_stream_dict(text=None, stop_reason="end_turn", tool_uses=None,
+                      input_tokens=10, output_tokens=5, total_tokens=15, latency_ms=100):
+    events = [{"messageStart": {"role": "assistant"}}]
+    idx = 0
+    if text:
+        events.append({"contentBlockDelta": {"contentBlockIndex": idx, "delta": {"text": text}}})
+        events.append({"contentBlockStop": {"contentBlockIndex": idx}})
+        idx += 1
+    for tu in (tool_uses or []):
+        events.append({"contentBlockStart": {"contentBlockIndex": idx, "start": {"toolUse": {"toolUseId": tu["toolUseId"], "name": tu["name"]}}}})
+        events.append({"contentBlockDelta": {"contentBlockIndex": idx, "delta": {"toolUse": {"input": json.dumps(tu["input"])}}}})
+        events.append({"contentBlockStop": {"contentBlockIndex": idx}})
+        idx += 1
+    events.append({"messageStop": {"stopReason": stop_reason}})
+    events.append({"metadata": {"usage": {"inputTokens": input_tokens, "outputTokens": output_tokens, "totalTokens": total_tokens}, "metrics": {"latencyMs": latency_ms}}})
+    return {"stream": events}
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -612,6 +631,282 @@ class TestConverseAgent(unittest.TestCase):
         agent._client.converse.side_effect = [resp1, resp2]
         result = agent.run("Do it")
         self.assertEqual(result, "Handled error")
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  6b. stream_run parity — same scenarios as run(), via the streaming path
+# ══════════════════════════════════════════════════════════════════════════════
+
+class TestStreamRunParity(unittest.TestCase):
+    def _make_agent(self):
+        agent = ConverseAgent(model_id="anthropic.claude-3-5-sonnet-20241022-v2:0")
+        agent._client = MagicMock()
+        return agent
+
+    def _drain(self, gen):
+        events = []
+        try:
+            while True:
+                events.append(next(gen))
+        except StopIteration as stop:
+            return events, stop.value
+
+    def test_stream_single_turn_exit(self):
+        agent = self._make_agent()
+        agent._client.converse_stream.return_value = _make_stream_dict(
+            tool_uses=[{"toolUseId": "t1", "name": "Finish", "input": {"final_response": "Done!"}}], stop_reason="tool_use")
+        events, result = self._drain(agent.stream_run("Do something"))
+        self.assertEqual(result, "Done!")
+        types = [e["type"] for e in events]
+        self.assertIn("iteration_start", types)
+        self.assertIn("tool_call", types)
+        self.assertEqual(events[-1], {"type": "done", "result": "Done!"})
+
+    def test_stream_tool_then_exit(self):
+        agent = self._make_agent()
+
+        @tool
+        def lookup(query: str):
+            """Look up info"""
+            return "result: 42"
+
+        agent.add_tool(lookup)
+        agent._client.converse_stream.side_effect = [
+            _make_stream_dict(tool_uses=[{"toolUseId": "t1", "name": "lookup", "input": {"query": "meaning of life"}}], stop_reason="tool_use"),
+            _make_stream_dict(tool_uses=[{"toolUseId": "t2", "name": "Finish", "input": {"final_response": "The answer is 42"}}], stop_reason="tool_use"),
+        ]
+        events, result = self._drain(agent.stream_run("What is the meaning of life?"))
+        self.assertEqual(result, "The answer is 42")
+        self.assertEqual(agent._client.converse_stream.call_count, 2)
+        tool_results = [e for e in events if e["type"] == "tool_result"]
+        self.assertTrue(any(e["name"] == "lookup" and e["result"] == "result: 42" for e in tool_results))
+
+    def test_stream_text_only_exits_immediately(self):
+        agent = self._make_agent()
+        agent.max_iterations = 5
+        agent._client.converse_stream.return_value = _make_stream_dict(text="Thinking...", stop_reason="end_turn")
+        events, result = self._drain(agent.stream_run("Do something"))
+        self.assertEqual(result, "Thinking...")
+        self.assertEqual(agent._client.converse_stream.call_count, 1)
+        self.assertEqual(events[-1], {"type": "done", "result": "Thinking..."})
+
+    def test_stream_structured_output(self):
+        agent = self._make_agent()
+        agent.with_structured_output(TestOutput)
+        agent._client.converse_stream.return_value = _make_stream_dict(
+            tool_uses=[{"toolUseId": "t1", "name": "TestOutput", "input": {"test_field": "hello"}}], stop_reason="tool_use")
+        events, result = self._drain(agent.stream_run("Extract"))
+        self.assertIsInstance(result, TestOutput)
+        self.assertEqual(result.test_field, "hello")
+        self.assertEqual(events[-1]["type"], "done")
+
+    def test_stream_tool_error_handled(self):
+        agent = self._make_agent()
+
+        @tool
+        def fail_tool(x: str):
+            """Always fails"""
+            raise RuntimeError("broken")
+
+        agent.add_tool(fail_tool)
+        agent._client.converse_stream.side_effect = [
+            _make_stream_dict(tool_uses=[{"toolUseId": "t1", "name": "fail_tool", "input": {"x": "hi"}}], stop_reason="tool_use"),
+            _make_stream_dict(tool_uses=[{"toolUseId": "t2", "name": "Finish", "input": {"final_response": "Handled error"}}], stop_reason="tool_use"),
+        ]
+        events, result = self._drain(agent.stream_run("Do it"))
+        self.assertEqual(result, "Handled error")
+        errors = [e for e in events if e["type"] == "tool_result" and e["status"] == "error"]
+        self.assertEqual(len(errors), 1)
+
+    def test_run_and_stream_run_agree(self):
+        scenario = dict(tool_uses=[{"toolUseId": "t1", "name": "Finish", "input": {"final_response": "Same"}}], stop_reason="tool_use")
+        run_agent = self._make_agent()
+        run_agent._client.converse.return_value = _make_response_dict(text=None, **scenario)
+        stream_agent = self._make_agent()
+        stream_agent._client.converse_stream.return_value = _make_stream_dict(**scenario)
+        _, stream_result = self._drain(stream_agent.stream_run("Go"))
+        self.assertEqual(run_agent.run("Go"), stream_result)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  6c. Parallel tool execution
+# ══════════════════════════════════════════════════════════════════════════════
+
+class TestParallelTools(unittest.TestCase):
+    def _make_agent(self, parallel=True):
+        agent = ConverseAgent(model_id="anthropic.claude-3-5-sonnet-20241022-v2:0", parallel_tools=parallel)
+        agent._client = MagicMock()
+        return agent
+
+    def _drain(self, gen):
+        events = []
+        try:
+            while True:
+                events.append(next(gen))
+        except StopIteration as stop:
+            return events, stop.value
+
+    def _two_tool_turn(self):
+        return [
+            _make_stream_dict(tool_uses=[
+                {"toolUseId": "a", "name": "alpha", "input": {"x": "1"}},
+                {"toolUseId": "b", "name": "beta", "input": {"x": "2"}},
+            ], stop_reason="tool_use"),
+            _make_stream_dict(tool_uses=[{"toolUseId": "f", "name": "Finish", "input": {"final_response": "done"}}], stop_reason="tool_use"),
+        ]
+
+    def test_parallel_runs_tools_concurrently(self):
+        # A 2-party barrier only releases if both tool bodies are in flight at once.
+        # Serial execution would block on the first wait() and time out -> errors.
+        barrier = threading.Barrier(2, timeout=3)
+
+        @tool
+        def alpha(x: str):
+            """alpha"""
+            barrier.wait()
+            return "A"
+
+        @tool
+        def beta(x: str):
+            """beta"""
+            barrier.wait()
+            return "B"
+
+        agent = self._make_agent(parallel=True)
+        agent.add_tool(alpha)
+        agent.add_tool(beta)
+        agent._client.converse_stream.side_effect = self._two_tool_turn()
+        events, result = self._drain(agent.stream_run("go"))
+        self.assertEqual(result, "done")
+        results = {e["tool_use_id"]: e["result"] for e in events if e["type"] == "tool_result"}
+        self.assertEqual(results["a"], "A")
+        self.assertEqual(results["b"], "B")
+
+    def test_parallel_matches_serial_results(self):
+        def build(parallel):
+            @tool
+            def alpha(x: str):
+                """alpha"""
+                return "result-A"
+
+            @tool
+            def beta(x: str):
+                """beta"""
+                return "result-B"
+
+            agent = self._make_agent(parallel=parallel)
+            agent.add_tool(alpha)
+            agent.add_tool(beta)
+            agent._client.converse_stream.side_effect = self._two_tool_turn()
+            events, result = self._drain(agent.stream_run("go"))
+            return result, {e["tool_use_id"]: e["result"] for e in events if e["type"] == "tool_result"}
+
+        self.assertEqual(build(parallel=True), build(parallel=False))
+
+    def test_parallel_preserves_content_order_in_message(self):
+        @tool
+        def alpha(x: str):
+            """alpha"""
+            time.sleep(0.05)
+            return "A"
+
+        @tool
+        def beta(x: str):
+            """beta"""
+            return "B"
+
+        agent = self._make_agent(parallel=True)
+        agent.add_tool(alpha)
+        agent.add_tool(beta)
+        agent._client.converse_stream.side_effect = self._two_tool_turn()
+        self._drain(agent.stream_run("go"))
+        tool_message = next(m for m in agent.messages if m.role == "user" and any(c.tool_result for c in m.content))
+        ids = [c.tool_result.tool_use_id for c in tool_message.content if c.tool_result]
+        self.assertEqual(ids, ["a", "b"])
+
+    def test_thread_hook_wraps_pooled_calls(self):
+        calls = []
+
+        def hook(fn):
+            calls.append(1)
+            try:
+                return fn()
+            finally:
+                calls.append(0)
+
+        @tool
+        def alpha(x: str):
+            """alpha"""
+            return "A"
+
+        @tool
+        def beta(x: str):
+            """beta"""
+            return "B"
+
+        agent = self._make_agent(parallel=True)
+        agent.tool_thread_hook = hook
+        agent.add_tool(alpha)
+        agent.add_tool(beta)
+        agent._client.converse_stream.side_effect = self._two_tool_turn()
+        self._drain(agent.stream_run("go"))
+        self.assertEqual(calls.count(1), 2)
+        self.assertEqual(calls.count(0), 2)
+
+    def test_parallel_tool_error_isolated(self):
+        @tool
+        def good(x: str):
+            """good"""
+            return "ok"
+
+        @tool
+        def bad(x: str):
+            """bad"""
+            raise RuntimeError("boom")
+
+        agent = self._make_agent(parallel=True)
+        agent.add_tool(good)
+        agent.add_tool(bad)
+        agent._client.converse_stream.side_effect = [
+            _make_stream_dict(tool_uses=[
+                {"toolUseId": "g", "name": "good", "input": {"x": "1"}},
+                {"toolUseId": "d", "name": "bad", "input": {"x": "2"}},
+            ], stop_reason="tool_use"),
+            _make_stream_dict(tool_uses=[{"toolUseId": "f", "name": "Finish", "input": {"final_response": "handled"}}], stop_reason="tool_use"),
+        ]
+        events, result = self._drain(agent.stream_run("go"))
+        self.assertEqual(result, "handled")
+        by_id = {e["tool_use_id"]: e for e in events if e["type"] == "tool_result"}
+        self.assertEqual(by_id["g"]["status"], "success")
+        self.assertEqual(by_id["d"]["status"], "error")
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  6d. Message serialization cache
+# ══════════════════════════════════════════════════════════════════════════════
+
+class TestMessageSerializationCache(unittest.TestCase):
+    def test_returns_fresh_copy_so_callers_cannot_pollute_cache(self):
+        msg = Message(role="user")
+        msg.add_text("hello")
+        first = msg.to_dict()
+        # cache_rolling_messages appends cache points to the returned content list each turn
+        msg.to_dict()["content"].append({"cachePoint": {"type": "default"}})
+        self.assertEqual(msg.to_dict(), first)
+
+    def test_invalidates_on_append(self):
+        msg = Message(role="user")
+        msg.add_text("a")
+        self.assertEqual(len(msg.to_dict()["content"]), 1)
+        msg.add_text("b")
+        self.assertEqual(len(msg.to_dict()["content"]), 2)
+
+    def test_invalidates_on_content_reassign(self):
+        msg = Message(role="user")
+        msg.add_text("a")
+        msg.to_dict()
+        msg.content = [MessageContent(text="z")]
+        self.assertEqual(msg.to_dict()["content"][0]["text"], "z")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
