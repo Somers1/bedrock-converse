@@ -261,15 +261,17 @@ entities = agent.run("Extract entities from: 'John works at Google in Sydney'")
 
 ### Prompt caching across the loop
 
-A single agent turn makes one Bedrock call per tool iteration, each re-sending the system prompt, tools, and the whole growing message history. `with_prompt_caching()` adds rolling cache points so that stable content is written once and read cheaply on every subsequent call:
+A single agent turn makes one Bedrock call per tool iteration, each re-sending the system prompt, tools, and the whole growing message history. `with_prompt_caching()` places **one rolling cache point on the last message before every call**, so the growing conversation is written once and read cheaply on each subsequent call:
 
 ```python
-agent = ConverseAgent(model_id="us.anthropic.claude-sonnet-4-20250514-v1:0", region_name="us-east-1")
+agent = ConverseAgent(model_id="us.anthropic.claude-sonnet-4-5-20250929-v1:0", region_name="us-east-1")
 agent.bind_tools([search, calculate])
-agent.with_prompt_caching()  # message_ttl="5m", static_ttl="1h"
+agent.with_prompt_caching(ttl="1h")   # single TTL; defaults to "5m"
 ```
 
-The system prompt, tools, and the turn's opening user message are cached at `static_ttl` (stable for the whole turn and across rapid follow-ups). The tool-call tail that grows during the loop rolls at `message_ttl`, leapfrogging so each call reads the previous iteration's prefix. Cache points are injected into the request payload only — your `Message` objects are never mutated, so persisted history stays clean. Unsupported models are skipped automatically.
+Tool-loop iterations and new user turns are the same thing to the cache — both append to the message list — so one moving point covers both. The point is injected into the request payload only, so your `Message` objects are never mutated and persisted history stays clean. It's **non-destructive**: it only ever appends to the last message and skips even that if you've already placed a point there, so your own cache points are never moved or removed. Unsupported models are skipped automatically.
+
+**Static / tiered caching is yours to place.** The SDK does not cache the system prompt or tools — add those points where you build the agent (`add_system_cache_point()`, a tools cache point, per-user prefixes), most-shared first, staying within Bedrock's 4-breakpoint limit. See [docs/prompt-caching.md](docs/prompt-caching.md) for the full design, the TTL-invariant rule behind it, and the experiments that established it.
 
 ### How the loop works
 

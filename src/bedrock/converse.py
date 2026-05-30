@@ -1506,8 +1506,7 @@ class ConverseAgent(Converse):
     # only communicate via tools during the loop. Text-only responses still work as the exit signal.
     suppress_text_during_loop: bool = True
     prompt_caching: bool = False
-    cache_static_ttl: str = "1h"
-    cache_message_ttl: str = "5m"
+    cache_ttl: str = "5m"
 
     # When set, tool calls the model emits together in one turn run concurrently on a thread pool
     # instead of one-after-another. Ref resolution, the exit tool, and model-switch tools stay serial
@@ -1518,40 +1517,22 @@ class ConverseAgent(Converse):
     tool_thread_hook: Optional[Callable] = None
 
     def __post_init__(self):
-        super()._TO_DICT_EXCLUSIONS.extend(['max_iterations', 'exit_tool', 'structured_output', 'debug', '_list_wrapped', '_on_text', 'suppress_text_during_loop', 'ref_registry', 'prompt_caching', 'cache_static_ttl', 'cache_message_ttl', 'parallel_tools', 'tool_thread_hook'])
+        super()._TO_DICT_EXCLUSIONS.extend(['max_iterations', 'exit_tool', 'structured_output', 'debug', '_list_wrapped', '_on_text', 'suppress_text_during_loop', 'ref_registry', 'prompt_caching', 'cache_ttl', 'parallel_tools', 'tool_thread_hook'])
 
-    def with_prompt_caching(self, message_ttl="5m", static_ttl="1h"):
+    def with_prompt_caching(self, ttl="5m"):
         self.prompt_caching = True
-        self.cache_message_ttl = message_ttl
-        self.cache_static_ttl = static_ttl
+        self.cache_ttl = ttl
         return self
 
     def build_payload(self, messages):
         payload = super().build_payload(messages)
         if self.prompt_caching and self.caching_supported:
-            self.cache_static_prefix(payload)
             self.cache_rolling_messages(payload.get('messages') or [])
         return payload
 
-    def cache_static_prefix(self, payload):
-        if system := payload.get('system'):
-            return system.append(self.cache_block(self.cache_static_ttl))
-        if tools := payload.get('toolConfig', {}).get('tools'):
-            tools.append(self.cache_block(self.cache_static_ttl))
-
     def cache_rolling_messages(self, messages):
-        if not messages:
-            return
-        last = len(messages) - 1
-        if getattr(self, '_cache_anchor', None) is None:
-            self._cache_anchor = last
-        points = {self._cache_anchor: self.cache_static_ttl}
-        for index in (getattr(self, '_cache_previous', None), last):
-            if index is not None and index != self._cache_anchor:
-                points[index] = self.cache_message_ttl
-        for index, ttl in points.items():
-            messages[index]['content'].append(self.cache_block(ttl))
-        self._cache_previous = last
+        if messages and not any('cachePoint' in content for content in messages[-1]['content']):
+            messages[-1]['content'].append(self.cache_block(self.cache_ttl))
 
     def cache_block(self, ttl):
         return MessageContent(cache_point=CachePoint(ttl=ttl)).to_dict()
