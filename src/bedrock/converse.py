@@ -1493,6 +1493,10 @@ class Finish(BaseModel):
 class ConverseAgent(Converse):
     max_iterations: int = 15
     exit_tool: Optional[Tool] = None
+    # When no exit_tool, on_text hook, or structured output is set, the loop auto-binds the Finish
+    # tool as a default way to end. Set False to rely on the natural text-only exit instead, for chat
+    # agents that end by replying in plain text rather than burying a final message in a tool call.
+    auto_exit_tool: bool = True
     structured_output: Optional[BaseModel] = None
     debug: bool = False
     _list_wrapped: bool = False  # Track if we wrapped a List type
@@ -1517,7 +1521,7 @@ class ConverseAgent(Converse):
     tool_thread_hook: Optional[Callable] = None
 
     def __post_init__(self):
-        super()._TO_DICT_EXCLUSIONS.extend(['max_iterations', 'exit_tool', 'structured_output', 'debug', '_list_wrapped', '_on_text', 'suppress_text_during_loop', 'ref_registry', 'prompt_caching', 'cache_ttl', 'parallel_tools', 'tool_thread_hook'])
+        super()._TO_DICT_EXCLUSIONS.extend(['max_iterations', 'exit_tool', 'auto_exit_tool', 'structured_output', 'debug', '_list_wrapped', '_on_text', 'suppress_text_during_loop', 'ref_registry', 'prompt_caching', 'cache_ttl', 'parallel_tools', 'tool_thread_hook'])
 
     def with_prompt_caching(self, ttl="5m"):
         self.prompt_caching = True
@@ -1688,7 +1692,7 @@ class ConverseAgent(Converse):
         self.ref_registry = {}
         if self.structured_output:
             self.bind_exit_tool(self.structured_output)
-        elif self.exit_tool is None and not self._on_text:
+        elif self.exit_tool is None and not self._on_text and self.auto_exit_tool:
             self.bind_exit_tool(Finish)
         if isinstance(message, str):
             message = Message().add_text(message)
