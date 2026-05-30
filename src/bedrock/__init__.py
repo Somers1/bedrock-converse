@@ -4,7 +4,7 @@ from .converse import (
     ThinkingConfig, SystemContent, MessageContent, Document, Image, Video,
     ToolUse, ToolResult, ToolResultContent, Tool, ToolSpec, ToolChoice,
     ConverseToolConfig, AdditionalModelRequestFields, ConversePerformanceConfig,
-    Finish, structured_model_factory
+    Finish, structured_model_factory, TokenUsage
 )
 from .tools import tool, Tools, exit_tool, ModelSwitch, model_switch
 from .embedding import (
