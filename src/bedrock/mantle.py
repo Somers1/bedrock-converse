@@ -371,7 +371,8 @@ class _MantleTransport:
         yield {"type": "text_delta", "index": index, "text": event.delta}
 
     def _responses_reasoning_delta(self, event):
-        index = self._stream_block_index(f"reasoning:{event.output_index}:{event.content_index}")
+        part_index = getattr(event, 'content_index', getattr(event, 'summary_index', 0))
+        index = self._stream_block_index(f"reasoning:{event.output_index}:{part_index}")
         yield from self._start_content_block(index, "reasoning")
         self._stream_reasoning_parts.append(event.delta)
         yield {"type": "reasoning_delta", "index": index, "reasoning": {"text": event.delta}}
