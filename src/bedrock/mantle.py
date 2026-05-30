@@ -20,9 +20,12 @@ STOP_REASON_MAP = {'stop': 'end_turn', 'length': 'max_tokens', 'tool_calls': 'to
 
 class _MantleTransport:
     api_key: Optional[str] = None
+    base_url: Optional[str] = None
 
     @property
     def _mantle_base_url(self):
+        if self.base_url:
+            return self.base_url
         if endpoint := os.environ.get('MANTLE_ENDPOINT'):
             return endpoint
         region = self.region_name or self.session.region_name
@@ -367,6 +370,7 @@ class _MantleTransport:
 @dataclass
 class Mantle(_MantleTransport, Converse):
     api_key: Optional[str] = None
+    base_url: Optional[str] = None
 
     @property
     def structured_output_class(self):
@@ -375,14 +379,17 @@ class Mantle(_MantleTransport, Converse):
     def with_structured_output(self, output_model, force_choice=True, skip_add_tool=False, first_tool_only=True):
         structured = super().with_structured_output(output_model, force_choice, skip_add_tool, first_tool_only)
         structured.api_key = self.api_key
+        structured.base_url = self.base_url
         return structured
 
 
 @dataclass
 class MantleAgent(_MantleTransport, ConverseAgent):
     api_key: Optional[str] = None
+    base_url: Optional[str] = None
 
 
 @dataclass
 class StructuredMantle(_MantleTransport, StructuredConverse):
     api_key: Optional[str] = None
+    base_url: Optional[str] = None
