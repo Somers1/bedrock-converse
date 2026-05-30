@@ -21,6 +21,7 @@ STOP_REASON_MAP = {'stop': 'end_turn', 'length': 'max_tokens', 'tool_calls': 'to
 class _MantleTransport:
     api_key: Optional[str] = None
     base_url: Optional[str] = None
+    api_mode: str = 'chat_completions'
 
     @property
     def _mantle_base_url(self):
@@ -73,17 +74,25 @@ class _MantleTransport:
         if ic.top_p is not None: params['top_p'] = ic.top_p
         if ic.stop_sequences: params['stop'] = ic.stop_sequences
 
-    def _build_thinking_params(self, params):
+    @property
+    def uses_responses_api(self):
+        return self.api_mode == 'responses'
+
+    @property
+    def reasoning_effort(self):
         if not (self.additional_model_request_fields and self.additional_model_request_fields.thinking
                 and self.additional_model_request_fields.thinking.type == 'enabled'):
-            return
+            return None
         budget = self.additional_model_request_fields.thinking.budget_tokens
         if isinstance(budget, str):
-            params['reasoning_effort'] = budget
-        else:
-            if budget <= 2048: params['reasoning_effort'] = 'low'
-            elif budget <= 8192: params['reasoning_effort'] = 'medium'
-            else: params['reasoning_effort'] = 'high'
+            return budget
+        if budget <= 2048: return 'low'
+        if budget <= 8192: return 'medium'
+        return 'high'
+
+    def _build_thinking_params(self, params):
+        if effort := self.reasoning_effort:
+            params['reasoning_effort'] = effort
 
     def _build_params(self, messages=None) -> dict:
         self.remove_invalid_caching(messages)
@@ -99,6 +108,64 @@ class _MantleTransport:
         self._build_inference_params(params)
         self._build_thinking_params(params)
         return params
+
+    def _build_responses_params(self, messages=None):
+        params = self._build_params(messages)
+        response_params = {'model': params['model'], 'input': self._responses_input(params['messages']), 'store': False}
+        if tools := params.get('tools'):
+            response_params['tools'] = self._responses_tools(tools)
+        if tool_choice := self._responses_tool_choice(params.get('tool_choice')):
+            response_params['tool_choice'] = tool_choice
+        if max_tokens := params.get('max_tokens'):
+            response_params['max_output_tokens'] = max_tokens
+        if params.get('temperature') is not None:
+            response_params['temperature'] = params['temperature']
+        if params.get('top_p') is not None:
+            response_params['top_p'] = params['top_p']
+        if effort := params.get('reasoning_effort'):
+            response_params['reasoning'] = {'effort': effort, 'summary': 'auto'}
+        return response_params
+
+    def _responses_tools(self, tools):
+        return [{'type': 'function', 'name': tool['function']['name'],
+                 'description': tool['function'].get('description'), 'parameters': tool['function'].get('parameters') or {},
+                 'strict': False} for tool in tools]
+
+    def _responses_tool_choice(self, tool_choice):
+        if isinstance(tool_choice, str):
+            return tool_choice
+        if tool_choice and tool_choice.get('type') == 'function':
+            return {'type': 'function', 'name': tool_choice['function']['name']}
+        return None
+
+    def _responses_input(self, messages):
+        items = []
+        for message in messages:
+            if message['role'] == 'tool':
+                items.append({'type': 'function_call_output', 'call_id': message['tool_call_id'], 'output': message.get('content') or ''})
+                continue
+            if message['role'] == 'assistant':
+                if message.get('content'):
+                    items.append({'type': 'message', 'role': 'assistant', 'content': message['content']})
+                items.extend(self._responses_function_calls(message.get('tool_calls') or []))
+                continue
+            items.append({'type': 'message', 'role': message['role'], 'content': self._responses_content(message.get('content') or '')})
+        return items
+
+    def _responses_function_calls(self, tool_calls):
+        return [{'type': 'function_call', 'call_id': tool_call['id'], 'name': tool_call['function']['name'],
+                 'arguments': tool_call['function']['arguments'], 'status': 'completed'} for tool_call in tool_calls]
+
+    def _responses_content(self, content):
+        if isinstance(content, str):
+            return content
+        parts = []
+        for part in content:
+            if part.get('type') == 'text':
+                parts.append({'type': 'input_text', 'text': part.get('text') or ''})
+            elif part.get('type') == 'image_url':
+                parts.append({'type': 'input_image', 'image_url': part['image_url']['url'], 'detail': 'auto'})
+        return parts
 
     def _convert_tool_results(self, content_list):
         results = []
@@ -164,7 +231,7 @@ class _MantleTransport:
         reasoning = getattr(choice.message, 'reasoning', None) or getattr(choice.message, 'reasoning_content', None)
         if reasoning:
             content.append(MessageContent(reasoning_content=ReasoningContent(
-                reasoning_text=ReasoningText(text=reasoning, signature=''), redacted_content=b'')))
+                reasoning_text=ReasoningText(text=reasoning, signature=''), redacted_content=None)))
         if choice.message.content:
             content.append(MessageContent(text=choice.message.content))
         for tc in (choice.message.tool_calls or []):
@@ -193,7 +260,12 @@ class _MantleTransport:
             pass
         return self._stream_response(start)
 
-    def _stream_events(self, stream):
+    def _consume_responses_stream(self, stream, start) -> ConverseResponse:
+        for _event in self._responses_stream_events(stream):
+            pass
+        return self._stream_response(start)
+
+    def _start_stream(self):
         self._stream_text_parts = []
         self._stream_reasoning_parts = []
         self._stream_tool_calls = {}
@@ -202,6 +274,9 @@ class _MantleTransport:
         self._stream_block_order = []
         self._stream_finish_reason = None
         self._stream_usage = None
+
+    def _stream_events(self, stream):
+        self._start_stream()
         yield {"type": "message_start", "role": "assistant"}
         for chunk in stream:
             if chunk.usage:
@@ -215,9 +290,33 @@ class _MantleTransport:
             yield from self._stream_reasoning_delta(delta)
             yield from self._stream_text_delta(delta)
             yield from self._stream_tool_deltas(delta)
+        yield from self._stream_end_events()
+
+    def _responses_stream_events(self, stream):
+        self._start_stream()
+        yield {"type": "message_start", "role": "assistant"}
+        for event in stream:
+            event_type = getattr(event, 'type', '')
+            if event_type == 'response.output_text.delta':
+                yield from self._responses_text_delta(event)
+            elif event_type in ('response.reasoning_text.delta', 'response.reasoning_summary_text.delta'):
+                yield from self._responses_reasoning_delta(event)
+            elif event_type == 'response.output_item.added':
+                yield from self._responses_output_item(event.item)
+            elif event_type == 'response.output_item.done':
+                yield from self._responses_output_item(event.item)
+            elif event_type == 'response.function_call_arguments.delta':
+                yield from self._responses_function_call_arguments_delta(event)
+            elif event_type == 'response.completed':
+                self._responses_completed(event.response)
+            elif event_type in ('response.failed', 'response.error'):
+                raise RuntimeError(getattr(event, 'error', event))
+        yield from self._stream_end_events()
+
+    def _stream_end_events(self):
         for index in self._stream_block_order:
             yield {"type": "content_block_stop", "index": index}
-        yield {"type": "message_stop", "stop_reason": STOP_REASON_MAP.get(self._stream_finish_reason or '', 'end_turn')}
+        yield {"type": "message_stop", "stop_reason": STOP_REASON_MAP.get(self._stream_finish_reason or '', self._stream_finish_reason or 'end_turn')}
         yield {"type": "metadata", "usage": self._stream_usage_obj(), "metrics": None}
 
     def _stream_block_index(self, key):
@@ -226,13 +325,17 @@ class _MantleTransport:
             self._stream_block_order.append(self._stream_block_indexes[key])
         return self._stream_block_indexes[key]
 
+    def _start_content_block(self, index, block_type, **kwargs):
+        if index in self._stream_started_blocks:
+            return []
+        self._stream_started_blocks.add(index)
+        return [{"type": "content_block_start", "index": index, "block_type": block_type, **kwargs}]
+
     def _stream_text_delta(self, delta):
         if not delta.content:
             return
         index = self._stream_block_index("text")
-        if index not in self._stream_started_blocks:
-            self._stream_started_blocks.add(index)
-            yield {"type": "content_block_start", "index": index, "block_type": "text"}
+        yield from self._start_content_block(index, "text")
         self._stream_text_parts.append(delta.content)
         yield {"type": "text_delta", "index": index, "text": delta.content}
 
@@ -241,9 +344,7 @@ class _MantleTransport:
         if not reasoning:
             return
         index = self._stream_block_index("reasoning")
-        if index not in self._stream_started_blocks:
-            self._stream_started_blocks.add(index)
-            yield {"type": "content_block_start", "index": index, "block_type": "reasoning"}
+        yield from self._start_content_block(index, "reasoning")
         self._stream_reasoning_parts.append(reasoning)
         yield {"type": "reasoning_delta", "index": index, "reasoning": {"text": reasoning}}
 
@@ -258,17 +359,61 @@ class _MantleTransport:
                     tool_call['name'] = tc.function.name
                 if tc.function.arguments:
                     tool_call['arguments'] += tc.function.arguments
-            if index not in self._stream_started_blocks and tool_call['id'] and tool_call['name']:
-                self._stream_started_blocks.add(index)
-                yield {"type": "content_block_start", "index": index, "block_type": "tool_use", "tool_use_id": tool_call['id'], "name": tool_call['name']}
+            if tool_call['id'] and tool_call['name']:
+                yield from self._start_content_block(index, "tool_use", tool_use_id=tool_call['id'], name=tool_call['name'])
             if index in self._stream_started_blocks and tc.function and tc.function.arguments:
                 yield {"type": "tool_use_input_delta", "index": index, "partial_json": tc.function.arguments}
+
+    def _responses_text_delta(self, event):
+        index = self._stream_block_index(f"text:{event.output_index}:{event.content_index}")
+        yield from self._start_content_block(index, "text")
+        self._stream_text_parts.append(event.delta)
+        yield {"type": "text_delta", "index": index, "text": event.delta}
+
+    def _responses_reasoning_delta(self, event):
+        index = self._stream_block_index(f"reasoning:{event.output_index}:{event.content_index}")
+        yield from self._start_content_block(index, "reasoning")
+        self._stream_reasoning_parts.append(event.delta)
+        yield {"type": "reasoning_delta", "index": index, "reasoning": {"text": event.delta}}
+
+    def _responses_output_item(self, item):
+        if getattr(item, 'type', None) != 'function_call':
+            return []
+        index = self._stream_block_index(f"tool:{item.id or item.call_id}")
+        tool_call = self._stream_tool_calls.setdefault(index, {'id': '', 'name': '', 'arguments': ''})
+        previous_arguments = tool_call['arguments']
+        tool_call['id'] = item.call_id or tool_call['id']
+        tool_call['name'] = item.name or tool_call['name']
+        if item.arguments and not tool_call['arguments']:
+            tool_call['arguments'] = item.arguments
+        if tool_call['id'] and tool_call['name']:
+            yield from self._start_content_block(index, "tool_use", tool_use_id=tool_call['id'], name=tool_call['name'])
+        if index in self._stream_started_blocks and tool_call['arguments'] and not previous_arguments:
+            yield {"type": "tool_use_input_delta", "index": index, "partial_json": tool_call['arguments']}
+
+    def _responses_function_call_arguments_delta(self, event):
+        index = self._stream_block_index(f"tool:{event.item_id}")
+        tool_call = self._stream_tool_calls.setdefault(index, {'id': '', 'name': '', 'arguments': ''})
+        tool_call['arguments'] += event.delta
+        if index in self._stream_started_blocks:
+            yield {"type": "tool_use_input_delta", "index": index, "partial_json": event.delta}
+
+    def _responses_completed(self, response):
+        self._stream_usage = response.usage
+        self._stream_finish_reason = self._responses_stop_reason(response)
+
+    def _responses_stop_reason(self, response):
+        if self._stream_tool_calls:
+            return 'tool_use'
+        if getattr(response, 'status', '') == 'incomplete':
+            return 'max_tokens'
+        return 'end_turn'
 
     def _stream_response(self, start) -> ConverseResponse:
         content = []
         if self._stream_reasoning_parts:
             content.append(MessageContent(reasoning_content=ReasoningContent(
-                reasoning_text=ReasoningText(text=''.join(self._stream_reasoning_parts), signature=''), redacted_content=b'')))
+                reasoning_text=ReasoningText(text=''.join(self._stream_reasoning_parts), signature=''), redacted_content=None)))
         if text := ''.join(self._stream_text_parts):
             content.append(MessageContent(text=text))
         for index in sorted(self._stream_tool_calls):
@@ -280,18 +425,23 @@ class _MantleTransport:
             content.append(MessageContent(tool_use=ToolUse(tool_use_id=tool_call['id'], name=tool_call['name'], input=args)))
         return ConverseResponse(
             output=ConverseOutput(message=Message(role='assistant', content=content)),
-            stop_reason=STOP_REASON_MAP.get(self._stream_finish_reason or '', 'end_turn'),
+            stop_reason=STOP_REASON_MAP.get(self._stream_finish_reason or '', self._stream_finish_reason or 'end_turn'),
             usage=self._stream_usage_obj(),
             metrics=ConverseMetrics(latency_ms=int((time.time() - start) * 1000)))
 
     def _stream_usage_obj(self):
         usage = self._stream_usage
         cache_read = 0
-        if usage and (details := getattr(usage, 'prompt_tokens_details', None)):
+        details = None
+        if usage:
+            details = getattr(usage, 'prompt_tokens_details', None) or getattr(usage, 'input_tokens_details', None)
+        if details:
             cache_read = getattr(details, 'cached_tokens', 0) or 0
+        input_tokens = getattr(usage, 'prompt_tokens', None) if usage else None
+        output_tokens = getattr(usage, 'completion_tokens', None) if usage else None
         return TokenUsage(
-            input_tokens=getattr(usage, 'prompt_tokens', 0) if usage else 0,
-            output_tokens=getattr(usage, 'completion_tokens', 0) if usage else 0,
+            input_tokens=input_tokens if input_tokens is not None else getattr(usage, 'input_tokens', 0) if usage else 0,
+            output_tokens=output_tokens if output_tokens is not None else getattr(usage, 'output_tokens', 0) if usage else 0,
             total_tokens=getattr(usage, 'total_tokens', 0) if usage else 0,
             cache_read_input_tokens=cache_read)
 
@@ -300,13 +450,17 @@ class _MantleTransport:
             try:
                 if hasattr(callback, 'on_converse_start'): callback.on_converse_start(self)
             except Exception as e: logger.warning(f"Callback error: {e}")
-        params = self._build_params(messages)
-        params['stream'] = True
-        params['stream_options'] = {'include_usage': True}
         start = time.time()
         try:
-            stream = self.openai_client.chat.completions.create(**params)
-            yield from self._stream_events(stream)
+            if self.uses_responses_api:
+                stream = self.openai_client.responses.create(**self._build_responses_params(messages), stream=True)
+                yield from self._responses_stream_events(stream)
+            else:
+                params = self._build_params(messages)
+                params['stream'] = True
+                params['stream_options'] = {'include_usage': True}
+                stream = self.openai_client.chat.completions.create(**params)
+                yield from self._stream_events(stream)
             response = self._stream_response(start)
         except Exception as error:
             for callback in self.callbacks:
@@ -335,13 +489,17 @@ class _MantleTransport:
         for callback in self.callbacks:
             try: callback.on_converse_start(self)
             except Exception as e: logger.warning(f"Callback error: {e}")
-        params = self._build_params(messages)
-        params['stream'] = True
-        params['stream_options'] = {'include_usage': True}
         start = time.time()
         try:
-            stream = self.openai_client.chat.completions.create(**params)
-            response = self._consume_stream(stream, start)
+            if self.uses_responses_api:
+                stream = self.openai_client.responses.create(**self._build_responses_params(messages), stream=True)
+                response = self._consume_responses_stream(stream, start)
+            else:
+                params = self._build_params(messages)
+                params['stream'] = True
+                params['stream_options'] = {'include_usage': True}
+                stream = self.openai_client.chat.completions.create(**params)
+                response = self._consume_stream(stream, start)
         except Exception as error:
             for callback in self.callbacks:
                 try:
@@ -388,7 +546,7 @@ class _MantleTransport:
             content = []
             if reasoning_parts:
                 content.append(MessageContent(reasoning_content=ReasoningContent(
-                    reasoning_text=ReasoningText(text=''.join(reasoning_parts), signature=''), redacted_content=b'')))
+                    reasoning_text=ReasoningText(text=''.join(reasoning_parts), signature=''), redacted_content=None)))
             full_text = ''.join(text_parts)
             if full_text: content.append(MessageContent(text=full_text))
             for idx in sorted(tool_calls_map):
@@ -431,6 +589,7 @@ class _MantleTransport:
 class Mantle(_MantleTransport, Converse):
     api_key: Optional[str] = None
     base_url: Optional[str] = None
+    api_mode: str = 'chat_completions'
 
     @property
     def structured_output_class(self):
@@ -440,6 +599,7 @@ class Mantle(_MantleTransport, Converse):
         structured = super().with_structured_output(output_model, force_choice, skip_add_tool, first_tool_only)
         structured.api_key = self.api_key
         structured.base_url = self.base_url
+        structured.api_mode = self.api_mode
         return structured
 
 
@@ -447,9 +607,11 @@ class Mantle(_MantleTransport, Converse):
 class MantleAgent(_MantleTransport, ConverseAgent):
     api_key: Optional[str] = None
     base_url: Optional[str] = None
+    api_mode: str = 'chat_completions'
 
 
 @dataclass
 class StructuredMantle(_MantleTransport, StructuredConverse):
     api_key: Optional[str] = None
     base_url: Optional[str] = None
+    api_mode: str = 'chat_completions'
