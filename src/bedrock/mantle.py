@@ -189,77 +189,137 @@ class _MantleTransport:
             metrics=ConverseMetrics(latency_ms=latency_ms))
 
     def _consume_stream(self, stream, start) -> ConverseResponse:
-        """Consume an OpenAI streaming response and assemble into ConverseResponse."""
-        text_parts = []
-        reasoning_parts = []
-        tool_calls = {}  # index -> {id, name, arguments}
-        finish_reason = None
-        usage = None
+        for _event in self._stream_events(stream):
+            pass
+        return self._stream_response(start)
 
+    def _stream_events(self, stream):
+        self._stream_text_parts = []
+        self._stream_reasoning_parts = []
+        self._stream_tool_calls = {}
+        self._stream_started_blocks = set()
+        self._stream_block_indexes = {}
+        self._stream_block_order = []
+        self._stream_finish_reason = None
+        self._stream_usage = None
+        yield {"type": "message_start", "role": "assistant"}
         for chunk in stream:
             if chunk.usage:
-                usage = chunk.usage
+                self._stream_usage = chunk.usage
             if not chunk.choices:
                 continue
-            delta = chunk.choices[0].delta
-            if chunk.choices[0].finish_reason:
-                finish_reason = chunk.choices[0].finish_reason
+            choice = chunk.choices[0]
+            delta = choice.delta
+            if choice.finish_reason:
+                self._stream_finish_reason = choice.finish_reason
+            yield from self._stream_reasoning_delta(delta)
+            yield from self._stream_text_delta(delta)
+            yield from self._stream_tool_deltas(delta)
+        for index in self._stream_block_order:
+            yield {"type": "content_block_stop", "index": index}
+        yield {"type": "message_stop", "stop_reason": STOP_REASON_MAP.get(self._stream_finish_reason or '', 'end_turn')}
+        yield {"type": "metadata", "usage": self._stream_usage_obj(), "metrics": None}
 
-            # Text content
-            if delta.content:
-                text_parts.append(delta.content)
+    def _stream_block_index(self, key):
+        if key not in self._stream_block_indexes:
+            self._stream_block_indexes[key] = len(self._stream_block_order)
+            self._stream_block_order.append(self._stream_block_indexes[key])
+        return self._stream_block_indexes[key]
 
-            # Reasoning (provider-specific)
-            reasoning = getattr(delta, 'reasoning', None) or getattr(delta, 'reasoning_content', None)
-            if reasoning:
-                reasoning_parts.append(reasoning)
+    def _stream_text_delta(self, delta):
+        if not delta.content:
+            return
+        index = self._stream_block_index("text")
+        if index not in self._stream_started_blocks:
+            self._stream_started_blocks.add(index)
+            yield {"type": "content_block_start", "index": index, "block_type": "text"}
+        self._stream_text_parts.append(delta.content)
+        yield {"type": "text_delta", "index": index, "text": delta.content}
 
-            # Tool calls arrive incrementally by index
-            for tc in (delta.tool_calls or []):
-                idx = tc.index
-                if idx not in tool_calls:
-                    tool_calls[idx] = {'id': tc.id or '', 'name': '', 'arguments': ''}
-                if tc.id:
-                    tool_calls[idx]['id'] = tc.id
-                if tc.function:
-                    if tc.function.name:
-                        tool_calls[idx]['name'] = tc.function.name
-                    if tc.function.arguments:
-                        tool_calls[idx]['arguments'] += tc.function.arguments
+    def _stream_reasoning_delta(self, delta):
+        reasoning = getattr(delta, 'reasoning', None) or getattr(delta, 'reasoning_content', None)
+        if not reasoning:
+            return
+        index = self._stream_block_index("reasoning")
+        if index not in self._stream_started_blocks:
+            self._stream_started_blocks.add(index)
+            yield {"type": "content_block_start", "index": index, "block_type": "reasoning"}
+        self._stream_reasoning_parts.append(reasoning)
+        yield {"type": "reasoning_delta", "index": index, "reasoning": {"text": reasoning}}
 
-        # Build content list
+    def _stream_tool_deltas(self, delta):
+        for tc in (delta.tool_calls or []):
+            index = self._stream_block_index(f"tool:{tc.index}")
+            tool_call = self._stream_tool_calls.setdefault(index, {'id': '', 'name': '', 'arguments': ''})
+            if tc.id:
+                tool_call['id'] = tc.id
+            if tc.function:
+                if tc.function.name:
+                    tool_call['name'] = tc.function.name
+                if tc.function.arguments:
+                    tool_call['arguments'] += tc.function.arguments
+            if index not in self._stream_started_blocks and tool_call['id'] and tool_call['name']:
+                self._stream_started_blocks.add(index)
+                yield {"type": "content_block_start", "index": index, "block_type": "tool_use", "tool_use_id": tool_call['id'], "name": tool_call['name']}
+            if index in self._stream_started_blocks and tc.function and tc.function.arguments:
+                yield {"type": "tool_use_input_delta", "index": index, "partial_json": tc.function.arguments}
+
+    def _stream_response(self, start) -> ConverseResponse:
         content = []
-        if reasoning_parts:
+        if self._stream_reasoning_parts:
             content.append(MessageContent(reasoning_content=ReasoningContent(
-                reasoning_text=ReasoningText(text=''.join(reasoning_parts), signature=''), redacted_content=b'')))
-        full_text = ''.join(text_parts)
-        if full_text:
-            content.append(MessageContent(text=full_text))
-        for idx in sorted(tool_calls):
-            tc = tool_calls[idx]
-            args = tc['arguments']
+                reasoning_text=ReasoningText(text=''.join(self._stream_reasoning_parts), signature=''), redacted_content=b'')))
+        if text := ''.join(self._stream_text_parts):
+            content.append(MessageContent(text=text))
+        for index in sorted(self._stream_tool_calls):
+            tool_call = self._stream_tool_calls[index]
             try:
-                args = json.loads(args)
+                args = json.loads(tool_call['arguments']) if tool_call['arguments'] else {}
             except (json.JSONDecodeError, ValueError):
-                args = {"raw_input": args}
-            content.append(MessageContent(tool_use=ToolUse(tool_use_id=tc['id'], name=tc['name'], input=args)))
-
-        cache_read = 0
-        if usage:
-            details = getattr(usage, 'prompt_tokens_details', None)
-            if details:
-                cache_read = getattr(details, 'cached_tokens', 0) or 0
-
-        latency_ms = int((time.time() - start) * 1000)
+                args = {"raw_input": tool_call['arguments']}
+            content.append(MessageContent(tool_use=ToolUse(tool_use_id=tool_call['id'], name=tool_call['name'], input=args)))
         return ConverseResponse(
             output=ConverseOutput(message=Message(role='assistant', content=content)),
-            stop_reason=STOP_REASON_MAP.get(finish_reason or '', 'end_turn'),
-            usage=TokenUsage(
-                input_tokens=getattr(usage, 'prompt_tokens', 0) if usage else 0,
-                output_tokens=getattr(usage, 'completion_tokens', 0) if usage else 0,
-                total_tokens=getattr(usage, 'total_tokens', 0) if usage else 0,
-                cache_read_input_tokens=cache_read),
-            metrics=ConverseMetrics(latency_ms=latency_ms))
+            stop_reason=STOP_REASON_MAP.get(self._stream_finish_reason or '', 'end_turn'),
+            usage=self._stream_usage_obj(),
+            metrics=ConverseMetrics(latency_ms=int((time.time() - start) * 1000)))
+
+    def _stream_usage_obj(self):
+        usage = self._stream_usage
+        cache_read = 0
+        if usage and (details := getattr(usage, 'prompt_tokens_details', None)):
+            cache_read = getattr(details, 'cached_tokens', 0) or 0
+        return TokenUsage(
+            input_tokens=getattr(usage, 'prompt_tokens', 0) if usage else 0,
+            output_tokens=getattr(usage, 'completion_tokens', 0) if usage else 0,
+            total_tokens=getattr(usage, 'total_tokens', 0) if usage else 0,
+            cache_read_input_tokens=cache_read)
+
+    def stream(self, messages=None):
+        for callback in self.callbacks:
+            try:
+                if hasattr(callback, 'on_converse_start'): callback.on_converse_start(self)
+            except Exception as e: logger.warning(f"Callback error: {e}")
+        params = self._build_params(messages)
+        params['stream'] = True
+        params['stream_options'] = {'include_usage': True}
+        start = time.time()
+        try:
+            stream = self.openai_client.chat.completions.create(**params)
+            yield from self._stream_events(stream)
+            response = self._stream_response(start)
+        except Exception as error:
+            for callback in self.callbacks:
+                try:
+                    if hasattr(callback, 'on_converse_error'): callback.on_converse_error(self, error)
+                except Exception as callback_error: logger.warning(f"Callback error: {callback_error}")
+            raise
+        response.model_id = self.model_id
+        for callback in self.callbacks:
+            try:
+                if hasattr(callback, 'on_converse_end'): callback.on_converse_end(response)
+            except Exception as e: logger.warning(f"Callback error: {e}")
+        return response
 
     def with_thinking(self, tokens: int | str = 1024, enabled: bool = True):
         thinking_config = ThinkingConfig(
