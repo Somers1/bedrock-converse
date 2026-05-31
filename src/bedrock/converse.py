@@ -928,8 +928,9 @@ class Converse(ToDictMixin, FromDictMixin):
     aws_secret_access_key: Optional[str] = None
     _async_client: boto3.client = None
     tool_registry: ToolRegistry = field(default_factory=ToolRegistry)
+    cache_key: Optional[str] = None
     _TO_DICT_EXCLUSIONS = ['region_name', '_client', 'callbacks', 'aws_access_key_id', 'aws_secret_access_key',
-                           '_async_client', 'tool_registry']
+                           '_async_client', 'tool_registry', 'cache_key']
     CACHE_SUPPORTED_MODELS = ['claude-3-5-haiku', 'claude-3-7-sonnet', 'amazon.nova', 'claude-sonnet-4',
                               'claude-opus-4', 'claude-haiku-4', 'claude-haiku-4-5']
 
@@ -1164,6 +1165,10 @@ class Converse(ToDictMixin, FromDictMixin):
 
     def add_system_cache_point(self, ttl: Literal["5m", "1h"] | None = None):
         self.system.append(SystemContent(cache_point=CachePoint(ttl=ttl)))
+        return self
+
+    def with_cache_key(self, key):
+        self.cache_key = str(key) if key is not None else None
         return self
 
     def set_tool_choice(self, tool_name):

@@ -107,6 +107,8 @@ class _MantleTransport:
         self._build_tool_params(params)
         self._build_inference_params(params)
         self._build_thinking_params(params)
+        if self.cache_key:
+            params['prompt_cache_key'] = self.cache_key
         return params
 
     def _build_responses_params(self, messages=None):
@@ -124,6 +126,8 @@ class _MantleTransport:
             response_params['top_p'] = params['top_p']
         if effort := params.get('reasoning_effort'):
             response_params['reasoning'] = {'effort': effort, 'summary': 'auto'}
+        if cache_key := params.get('prompt_cache_key'):
+            response_params['prompt_cache_key'] = cache_key
         return response_params
 
     def _responses_tools(self, tools):
