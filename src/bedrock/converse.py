@@ -282,18 +282,18 @@ class ToDictMixin:
 
 
 @dataclass
-class S3Location(ToDictMixin):
+class S3Location(ToDictMixin, FromDictMixin):
     uri: str
     bucket_owner: Optional[str] = None
 
 
 @dataclass
-class FileSource(ToDictMixin):
+class FileSource(ToDictMixin, FromDictMixin):
     bytes: ByteString
 
 
 @dataclass
-class Image(ToDictMixin):
+class Image(ToDictMixin, FromDictMixin):
     format: Literal["png", "jpeg", "gif", "webp"]
     source: FileSource
 
@@ -306,7 +306,7 @@ class Image(ToDictMixin):
 
 
 @dataclass
-class Document(ToDictMixin):
+class Document(ToDictMixin, FromDictMixin):
     format: Literal["pdf", "csv", "doc", "docx", "xls", "xlsx", "html", "txt", "md"]
     name: str
     source: FileSource
@@ -325,13 +325,13 @@ class Document(ToDictMixin):
 
 
 @dataclass
-class VideoSource(ToDictMixin):
+class VideoSource(ToDictMixin, FromDictMixin):
     bytes: Optional[ByteString] = None
     s3_location: Optional[S3Location] = None
 
 
 @dataclass
-class Video(ToDictMixin):
+class Video(ToDictMixin, FromDictMixin):
     format: Literal["mkv", "mov", "mp4", "webm", "flv", "mpeg", "mpg", "wmv", "three_gp"]
     source: VideoSource
 
