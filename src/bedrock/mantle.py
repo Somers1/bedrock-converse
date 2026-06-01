@@ -181,6 +181,8 @@ class _MantleTransport:
             for trc in tr.content:
                 if trc.text: parts.append(trc.text)
                 elif trc.json is not None: parts.append(json.dumps(trc.json))
+                elif trc.image: parts.append('[image provided in the following message]')
+                elif trc.document: parts.append(f'[document: {trc.document.name}.{trc.document.format}]')
             results.append({'role': 'tool', 'tool_call_id': tr.tool_use_id, 'content': '\n'.join(parts)})
         return results
 
@@ -217,7 +219,8 @@ class _MantleTransport:
         return [{'role': 'user', 'content': parts[0].get('text', '')}]
 
     def _convert_message(self, msg):
-        tool_results = self._convert_tool_results(msg.content)
+        images = [MessageContent(image=item.image) for c in msg.content if c.tool_result for item in c.tool_result.content if item.image]
+        tool_results = self._convert_tool_results(msg.content) + (self._convert_user(images) if images else [])
         other = [c for c in msg.content if not c.tool_result and not c.cache_point]
         if not other:
             return tool_results

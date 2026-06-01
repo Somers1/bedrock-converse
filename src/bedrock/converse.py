@@ -1824,12 +1824,27 @@ class ConverseAgent(Converse):
 
     def build_tool_result(self, tool_use, result, exc):
         if exc is None:
-            result_str = self.extract_refs(str(result))
-            tool_result = ToolResult(tool_use_id=tool_use.tool_use_id, content=[ToolResultContent(text=result_str)], status="success")
-            return tool_result, {"type": "tool_result", "tool_use_id": tool_use.tool_use_id, "name": tool_use.name, "result": result_str, "status": "success"}
+            content = self.as_tool_content(result)
+            summary = '\n'.join(item.text if item.text is not None else self.content_label(item) for item in content)
+            tool_result = ToolResult(tool_use_id=tool_use.tool_use_id, content=content, status="success")
+            return tool_result, {"type": "tool_result", "tool_use_id": tool_use.tool_use_id, "name": tool_use.name, "result": summary, "status": "success"}
         logger.error(f'Failed to call tool {exc}', exc_info=exc)
         tool_result = ToolResult(tool_use_id=tool_use.tool_use_id, content=[ToolResultContent(text=str(exc))], status="error")
         return tool_result, {"type": "tool_result", "tool_use_id": tool_use.tool_use_id, "name": tool_use.name, "result": str(exc), "status": "error"}
+
+    def as_tool_content(self, result):
+        if isinstance(result, ToolResultContent):
+            return [result]
+        if isinstance(result, list) and result and all(isinstance(item, ToolResultContent) for item in result):
+            return result
+        return [ToolResultContent(text=self.extract_refs(str(result)))]
+
+    def content_label(self, item):
+        if item.image:
+            return f'[image/{item.image.format}]'
+        if item.document:
+            return f'[document: {item.document.name}.{item.document.format}]'
+        return json.dumps(item.json) if item.json is not None else ''
 
     def is_exit_tool(self, tool_name):
         return bool(self.exit_tool) and tool_name == self.exit_tool.tool_spec.name
