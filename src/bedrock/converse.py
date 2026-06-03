@@ -801,6 +801,14 @@ class BedrockStreamError(RuntimeError):
         super().__init__(f"{event_type}: {message}")
 
 
+class IncompleteToolUseError(RuntimeError):
+    def __init__(self, name, input_text, stop_reason):
+        self.name = name
+        self.input_text = input_text
+        self.stop_reason = stop_reason
+        super().__init__(f"incomplete tool input for {name!r} (stop_reason={stop_reason}): {input_text!r}")
+
+
 class StreamResponseBuilder:
     STREAM_ERROR_EVENTS = {
         "internalServerException",
@@ -899,13 +907,20 @@ class StreamResponseBuilder:
             if block["type"] == "text":
                 contents.append(MessageContent(text=block["text"]))
             elif block["type"] == "tool_use":
-                input_data = json.loads(block["input_text"]) if block["input_text"] else {}
-                contents.append(MessageContent(tool_use=ToolUse(tool_use_id=block["tool_use_id"], name=block["name"], input=input_data)))
+                contents.append(MessageContent(tool_use=ToolUse(tool_use_id=block["tool_use_id"], name=block["name"], input=self.tool_input(block))))
             elif block["type"] == "reasoning":
                 reasoning_text = ReasoningText(text=block["text"], signature=block["signature"])
                 contents.append(MessageContent(reasoning_content=ReasoningContent(reasoning_text=reasoning_text, redacted_content=block["redacted_content"])))
         message = Message(role=self.role, content=contents)
         return ConverseResponse(output=ConverseOutput(message=message), stop_reason=self.stop_reason, usage=self.usage, metrics=self.metrics, trace=self.trace, performance_config=self.performance_config, additional_model_response_fields=self.additional_model_response_fields)
+
+    def tool_input(self, block):
+        if not block["input_text"]:
+            return {}
+        try:
+            return json.loads(block["input_text"])
+        except json.JSONDecodeError as error:
+            raise IncompleteToolUseError(block["name"], block["input_text"], self.stop_reason) from error
 
 
 @dataclass
@@ -1525,8 +1540,13 @@ class ConverseAgent(Converse):
     # per-thread setup/teardown (e.g. closing a thread-local DB connection). Default runs fn directly.
     tool_thread_hook: Optional[Callable] = None
 
+    # A streamed tool call whose accumulated input fails to parse (a dropped/garbled Bedrock delta
+    # frame mid tool_use, despite content_block_stop) is unrepairable — its args would be guessed.
+    # The stream is re-requested this many times, emitting a stream_reset event before each retry.
+    stream_retries: int = 2
+
     def __post_init__(self):
-        super()._TO_DICT_EXCLUSIONS.extend(['max_iterations', 'exit_tool', 'auto_exit_tool', 'structured_output', 'debug', '_list_wrapped', '_on_text', 'suppress_text_during_loop', 'ref_registry', 'prompt_caching', 'cache_ttl', 'parallel_tools', 'tool_thread_hook'])
+        super()._TO_DICT_EXCLUSIONS.extend(['max_iterations', 'exit_tool', 'auto_exit_tool', 'structured_output', 'debug', '_list_wrapped', '_on_text', 'suppress_text_during_loop', 'ref_registry', 'prompt_caching', 'cache_ttl', 'parallel_tools', 'tool_thread_hook', 'stream_retries'])
 
     def with_prompt_caching(self, ttl="5m"):
         self.prompt_caching = True
@@ -1692,6 +1712,16 @@ class ConverseAgent(Converse):
         except StopIteration as stop:
             return stop.value
 
+    def streamed_response(self):
+        for attempt in range(self.stream_retries + 1):
+            try:
+                return (yield from self.stream())
+            except IncompleteToolUseError as error:
+                if attempt == self.stream_retries:
+                    raise
+                logger.warning(f"corrupt tool input, re-requesting stream (attempt {attempt + 1}/{self.stream_retries + 1}): {error}")
+                yield {"type": "stream_reset", "reason": "corrupt_tool_input"}
+
     def run_loop(self, message=None, max_iterations=None, first_tool_only=True, streaming=False):
         max_iterations = max_iterations or self.max_iterations
         self.ref_registry = {}
@@ -1708,7 +1738,13 @@ class ConverseAgent(Converse):
                 cb.on_run_start(self)
         for iteration in range(max_iterations):
             yield {"type": "iteration_start", "iteration": iteration}
-            response = (yield from self.stream()) if streaming else self._get_response()
+            try:
+                response = (yield from self.streamed_response()) if streaming else self._get_response()
+            except IncompleteToolUseError as error:
+                logger.error(f"stream returned corrupt tool input after {self.stream_retries} retries: {error}")
+                result = "The response was interrupted before it completed. Please try again."
+                yield {"type": "done", "result": result, "corrupt_tool_input": True}
+                return self._fire_run_end(result)
             if not response.output.message.content:
                 last_content_text = self.messages[-1].content[-1].text
                 logger.error(last_content_text)
