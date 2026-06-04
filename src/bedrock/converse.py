@@ -1545,8 +1545,14 @@ class ConverseAgent(Converse):
     # The stream is re-requested this many times, emitting a stream_reset event before each retry.
     stream_retries: int = 2
 
+    # When set, called as (tool_name, content) for each successful tool result, where content is the
+    # List[ToolResultContent] about to be sent to the model. Returns replacement content to substitute
+    # (e.g. an oversize result offloaded to a file and replaced by a short pointer) or None to keep as-is.
+    # Runs in-loop before the result is sent or persisted, so the substituted content is what gets cached.
+    tool_result_hook: Optional[Callable] = None
+
     def __post_init__(self):
-        super()._TO_DICT_EXCLUSIONS.extend(['max_iterations', 'exit_tool', 'auto_exit_tool', 'structured_output', 'debug', '_list_wrapped', '_on_text', 'suppress_text_during_loop', 'ref_registry', 'prompt_caching', 'cache_ttl', 'parallel_tools', 'tool_thread_hook', 'stream_retries'])
+        super()._TO_DICT_EXCLUSIONS.extend(['max_iterations', 'exit_tool', 'auto_exit_tool', 'structured_output', 'debug', '_list_wrapped', '_on_text', 'suppress_text_during_loop', 'ref_registry', 'prompt_caching', 'cache_ttl', 'parallel_tools', 'tool_thread_hook', 'stream_retries', 'tool_result_hook'])
 
     def with_prompt_caching(self, ttl="5m"):
         self.prompt_caching = True
@@ -1571,6 +1577,13 @@ class ConverseAgent(Converse):
         The hook receives the text string. If it returns a value, that becomes the
         agent's return value and the loop ends. If it returns None, the loop continues."""
         self._on_text = hook
+        return self
+
+    def on_tool_result(self, hook: callable):
+        """Register a hook called with (tool_name, content) for each successful tool result before it is
+        sent to the model, where content is the List[ToolResultContent]. Return replacement content to
+        substitute (e.g. an oversize result offloaded to a file), or None to keep the original."""
+        self.tool_result_hook = hook
         return self
 
     def bind_exit_tool(self, tool):
@@ -1861,6 +1874,8 @@ class ConverseAgent(Converse):
     def build_tool_result(self, tool_use, result, exc):
         if exc is None:
             content = self.as_tool_content(result)
+            if self.tool_result_hook:
+                content = self.tool_result_hook(tool_use.name, content) or content
             summary = '\n'.join(item.text if item.text is not None else self.content_label(item) for item in content)
             tool_result = ToolResult(tool_use_id=tool_use.tool_use_id, content=content, status="success")
             return tool_result, {"type": "tool_result", "tool_use_id": tool_use.tool_use_id, "name": tool_use.name, "result": summary, "status": "success"}
@@ -1915,4 +1930,3 @@ class ConverseAgent(Converse):
 
     def stream_run(self, message: Message | str = None, max_iterations=None, first_tool_only=True):
         return self.run_loop(message, max_iterations=max_iterations, first_tool_only=first_tool_only, streaming=True)
-        return self._fire_run_end(result)
