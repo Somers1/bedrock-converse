@@ -289,6 +289,94 @@ User message
 Repeats until: exit tool called, text-only response, or max_iterations hit
 ```
 
+### Controlling how the loop ends
+
+By default the agent auto-binds a `Finish` tool, so the model ends the turn by calling it with a final message. You can change that:
+
+```python
+# Chat agents that end by replying in plain text, not via a tool call
+agent.auto_exit_tool = False
+
+# Designate an already-bound tool as the exit (matches by name suffix)
+agent.bind_exit_tool("send_message")
+```
+
+Or mark a method on a `Tools` class with `@exit_tool`, and it becomes the exit automatically when bound:
+
+```python
+from bedrock import Tools, exit_tool
+
+class ChatTools(Tools):
+    @exit_tool
+    def send_message(self, text: str) -> str:
+        """Send the final reply to the user"""
+        return text
+```
+
+### Agent hooks
+
+```python
+# Called when the agent replies with text instead of tools. Return a value to end the
+# loop with it; return None to let the loop continue.
+agent.on_text(lambda text: text if "done" in text else None)
+
+# Called with (tool_name, content) for each successful tool result before it's sent to
+# the model. Return replacement content to substitute (e.g. offload an oversize result
+# to a file and swap in a short pointer), or None to keep the original. Runs in-loop, so
+# the substituted content is what gets cached and persisted.
+agent.on_tool_result(lambda name, content: offload(content) if too_big(content) else None)
+```
+
+### Parallel tool execution
+
+When the model emits several tool calls in one turn, run them concurrently instead of one-by-one. The exit tool and model-switch tools stay serial, so the ref registry and history are never touched off-thread:
+
+```python
+agent.parallel_tools = True
+# Optional wrapper around each pooled tool body for per-thread setup/teardown:
+agent.tool_thread_hook = lambda fn: run_with_db_connection(fn)
+```
+
+### Switching models mid-conversation
+
+Decorate a tool with `model_switch` and the agent swaps the conversation onto a different `Converse` before re-running the call — e.g. escalate to a stronger model when the task gets hard:
+
+```python
+from bedrock import model_switch, Converse
+
+strong = Converse(model_id="us.anthropic.claude-opus-4-20250514-v1:0", region_name="us-east-1")
+
+@model_switch(strong, message="Escalating to the larger model.")
+def escalate() -> str:
+    """Hand off to a more capable model for hard sub-problems"""
+    return "switched"
+```
+
+---
+
+## Streaming
+
+`invoke`, `converse`, and the agent `run` all take `stream=True` and yield normalized events as they arrive. The stream returns the final `ConverseResponse` (via `StopIteration.value`) once exhausted, and history is updated automatically:
+
+```python
+for event in converse.invoke("Write a haiku about the sea", stream=True):
+    if event["type"] == "text_delta":
+        print(event["text"], end="", flush=True)
+```
+
+For the agent loop, `run(stream=True)` (or `stream_run(...)`) interleaves model-output events with loop events — `iteration_start`, `tool_call`, `tool_result`, and a final `done` carrying the result:
+
+```python
+for event in agent.run("Research and summarise X", stream=True):
+    match event["type"]:
+        case "text_delta":      print(event["text"], end="")
+        case "tool_call":       print(f"\n→ {event['name']}({event['input']})")
+        case "tool_result":     print(f"  ✓ {event['status']}")
+        case "done":            final = event["result"]
+```
+
+Event types include `message_start`, `content_block_start`, `text_delta`, `reasoning_delta`, `tool_use_input_delta`, `content_block_stop`, `message_stop`, and `metadata`. If a streamed tool call arrives corrupt (a dropped Bedrock delta frame), the loop emits a `stream_reset` event and re-requests the stream up to `stream_retries` times (default 2) rather than guessing the arguments.
+
 ---
 
 ## Structured Output (without agent)
@@ -310,6 +398,13 @@ result = structured.invoke("I absolutely love this product!")
 print(result.label)  # "positive"
 ```
 
+If a model returns output that won't validate against your schema, fall back to another model automatically:
+
+```python
+structured.with_backup_model("us.anthropic.claude-opus-4-20250514-v1:0")
+# Pass a model id, or a fully-configured Converse instance to fall back to.
+```
+
 ---
 
 ## Thinking (Extended Reasoning)
@@ -321,6 +416,12 @@ converse = Converse(model_id="us.anthropic.claude-sonnet-4-20250514-v1:0", regio
 converse.with_thinking(tokens=2048)
 
 response = converse.invoke("Solve this step by step: what is 127 * 843 + 291?")
+```
+
+On Claude 4.5+ models that support **adaptive thinking**, let the model decide its own budget by effort level instead of a fixed token count:
+
+```python
+converse.with_adaptive_thinking(effort="high")  # "low" | "medium" | "high"
 ```
 
 ---
@@ -435,20 +536,51 @@ class MyCallback(BaseCallbackHandler):
         print(f"Used {response.usage.total_tokens} tokens, cost ${response.cost.total_cost:.4f}")
 ```
 
----
+Handlers can also hook the agent loop — `on_run_start`, `on_tool_start`, `on_tool_end` — for per-tool tracing.
 
-## InvokeModel (OpenAI-compatible)
+### Langfuse tracing
 
-Some Bedrock models use the InvokeModel API with OpenAI-format payloads instead of the Converse API. Set `use_invoke_model=True` and the SDK handles the conversion:
+`LangfuseCallback` traces every call, tool execution, and token/cost figure to [Langfuse](https://langfuse.com) out of the box:
 
 ```python
+from bedrock import Converse
+from bedrock.langfuse_callback import LangfuseCallback
+
 converse = Converse(
-    model_id="some-openai-compat-model",
+    model_id="us.anthropic.claude-sonnet-4-20250514-v1:0",
     region_name="us-east-1",
-    use_invoke_model=True
+    callbacks=[LangfuseCallback(user_id="u-123", session_id="s-456", tags=["prod"])],
 )
-# Same API — prompts, tools, everything works the same
-response = converse.invoke("Hello")
+```
+
+---
+
+## Mantle (OpenAI-compatible endpoint)
+
+Some models reach Bedrock through [Bedrock Mantle](https://docs.aws.amazon.com/bedrock/) — an OpenAI-compatible endpoint — rather than the Converse API. `Mantle`, `MantleAgent`, and `StructuredMantle` are drop-in subclasses of `Converse`, `ConverseAgent`, and `StructuredConverse`: the entire API (prompt building, tools, structured output, the agent loop, thinking, streaming) is identical — only the transport changes.
+
+```python
+from bedrock import Mantle, MantleAgent
+
+# Endpoint is derived from region (https://bedrock-mantle.{region}.api.aws/v1)
+mantle = Mantle(model_id="openai.gpt-oss-120b-1:0", region_name="us-east-1")
+response = mantle.invoke("Hello")
+
+# Or point at any OpenAI-compatible endpoint explicitly
+mantle = Mantle(
+    model_id="moonshotai/kimi-k2",
+    base_url="https://my-gateway/v1",
+    api_key="sk-...",
+)
+```
+
+`base_url` falls back to `MANTLE_ENDPOINT`, and `api_key` to `MANTLE_API_KEY`. Use `with_cache_key(key)` to set the OpenAI `prompt_cache_key` for prefix-cache routing. Set `api_mode="responses"` to drive the OpenAI **Responses** API instead of Chat Completions — useful for reasoning models that stream summarised thinking:
+
+```python
+agent = MantleAgent(model_id="openai.gpt-5", region_name="us-east-1", api_mode="responses")
+agent.bind_tools([search, calculate])
+agent.with_thinking("medium")  # mapped to reasoning_effort low/medium/high
+result = agent.run("...")
 ```
 
 ---
