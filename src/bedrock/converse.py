@@ -1550,9 +1550,10 @@ class ConverseAgent(Converse):
     # (e.g. an oversize result offloaded to a file and replaced by a short pointer) or None to keep as-is.
     # Runs in-loop before the result is sent or persisted, so the substituted content is what gets cached.
     tool_result_hook: Optional[Callable] = None
+    interrupt_exceptions: tuple[type[BaseException], ...] = field(default_factory=tuple)
 
     def __post_init__(self):
-        super()._TO_DICT_EXCLUSIONS.extend(['max_iterations', 'exit_tool', 'auto_exit_tool', 'structured_output', 'debug', '_list_wrapped', '_on_text', 'suppress_text_during_loop', 'ref_registry', 'prompt_caching', 'cache_ttl', 'parallel_tools', 'tool_thread_hook', 'stream_retries', 'tool_result_hook'])
+        super()._TO_DICT_EXCLUSIONS.extend(['max_iterations', 'exit_tool', 'auto_exit_tool', 'structured_output', 'debug', '_list_wrapped', '_on_text', 'suppress_text_during_loop', 'ref_registry', 'prompt_caching', 'cache_ttl', 'parallel_tools', 'tool_thread_hook', 'stream_retries', 'tool_result_hook', 'interrupt_exceptions'])
 
     def with_prompt_caching(self, ttl="5m"):
         self.prompt_caching = True
@@ -1584,6 +1585,10 @@ class ConverseAgent(Converse):
         sent to the model, where content is the List[ToolResultContent]. Return replacement content to
         substitute (e.g. an oversize result offloaded to a file), or None to keep the original."""
         self.tool_result_hook = hook
+        return self
+
+    def interrupt_on(self, *exceptions):
+        self.interrupt_exceptions = tuple(exceptions)
         return self
 
     def bind_exit_tool(self, tool):
@@ -1864,6 +1869,8 @@ class ConverseAgent(Converse):
                 tool_input = self.execute_model_switch(switch, tool_use)
             return self.tool_registry.execute(tool_use.name, tool_input), None, time.time() - start, tool_input, False
         except Exception as e:
+            if isinstance(e, self.interrupt_exceptions):
+                raise
             return None, e, time.time() - start, tool_input, False
 
     def run_one_tool_threaded(self, tool_use, tool_input):
