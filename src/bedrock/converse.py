@@ -1560,10 +1560,12 @@ class ConverseAgent(Converse):
     # event before each retry. A max_tokens truncation is NOT corruption — it routes to continuation.
     stream_retries: int = 2
 
-    # When a turn stops on max_tokens (the output cap reached mid-answer or mid tool_use), the loop
-    # continues it instead of discarding it: any unparseable trailing tool_use is dropped, the partial
-    # turn is kept, and the model is asked to continue. Bounds the consecutive continuations per turn.
-    max_continuations: int = 4
+    # When a turn stops on max_tokens (the output cap reached mid-answer or mid tool_use) any unparseable
+    # trailing tool_use is dropped and the partial turn is kept. This bounds how many times the loop then
+    # auto-continues the turn (asking the model to pick up where it left off). At 0 (the default) the loop
+    # does not auto-continue: it emits a continuation_required event and ends, leaving a valid partial turn
+    # the caller can continue manually. >0 enables bounded seamless auto-continuation.
+    max_continuations: int = 0
 
     # When set, called as (tool_name, content) for each successful tool result, where content is the
     # List[ToolResultContent] about to be sent to the model. Returns replacement content to substitute
@@ -1763,12 +1765,14 @@ class ConverseAgent(Converse):
                 yield {"type": "stream_reset", "reason": "corrupt_tool_input"}
 
     def continue_capped_turn(self):
-        partial = self.messages[-1]
-        partial.content = [c for c in partial.content if not c.is_unsigned_reasoning]
-        if partial.content:
+        self.prune_dangling_reasoning()
+        if self.messages[-1].content:
             self.messages.append(Message(role="user").add_text(self.CONTINUATION_PROMPT))
         else:
             self.messages.pop()
+
+    def prune_dangling_reasoning(self):
+        self.messages[-1].content = [c for c in self.messages[-1].content if not c.is_unsigned_reasoning]
 
     def run_loop(self, message=None, max_iterations=None, first_tool_only=True, streaming=False):
         max_iterations = max_iterations or self.max_iterations
@@ -1800,6 +1804,10 @@ class ConverseAgent(Converse):
                     continuations += 1
                     yield {"type": "max_tokens_continue", "continuation": continuations}
                     continue
+                if capped:
+                    yield {"type": "continuation_required"}
+                    yield {"type": "done", "result": None, "truncated": True}
+                    return self._fire_run_end(None)
                 last_content_text = self.messages[-1].content[-1].text
                 logger.error(last_content_text)
                 yield {"type": "done", "result": last_content_text}
@@ -1815,6 +1823,9 @@ class ConverseAgent(Converse):
                     self.continue_capped_turn()
                     yield {"type": "max_tokens_continue", "continuation": continuations}
                     continue
+                if capped:
+                    self.prune_dangling_reasoning()
+                    yield {"type": "continuation_required"}
                 # Returning text ends the loop; a trailing assistant message would trigger
                 # "must end with user message" on the next API call.
                 text_parts = [c.text for c in response.output.message.content if c.text]
