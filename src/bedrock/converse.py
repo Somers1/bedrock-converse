@@ -558,6 +558,11 @@ class MessageContent(ToDictMixin, FromDictMixin):
         if self.text:
             self.text = self.text[:400000].replace('\n', ' ')
 
+    @property
+    def is_unsigned_reasoning(self):
+        reasoning = self.reasoning_content
+        return bool(reasoning and reasoning.reasoning_text and not reasoning.reasoning_text.signature and not reasoning.redacted_content)
+
 
 @dataclass
 class Message(ToDictMixin, FromDictMixin):
@@ -776,6 +781,7 @@ class ConverseCost:
 class ConverseResponse(FromDictMixin):
     output: Optional[ConverseOutput] = None
     stop_reason: Optional[str] = None
+    truncated: bool = False
     usage: Optional[TokenUsage] = None
     metrics: Optional[ConverseMetrics] = None
     additional_model_response_fields: Optional[Any] = None
@@ -902,17 +908,25 @@ class StreamResponseBuilder:
 
     def build(self):
         contents = []
+        truncated = False
         for idx in self.block_order:
             block = self.blocks[idx]
             if block["type"] == "text":
                 contents.append(MessageContent(text=block["text"]))
             elif block["type"] == "tool_use":
-                contents.append(MessageContent(tool_use=ToolUse(tool_use_id=block["tool_use_id"], name=block["name"], input=self.tool_input(block))))
+                try:
+                    tool_input = self.tool_input(block)
+                except IncompleteToolUseError:
+                    if self.stop_reason != "max_tokens":
+                        raise
+                    truncated = True
+                    continue
+                contents.append(MessageContent(tool_use=ToolUse(tool_use_id=block["tool_use_id"], name=block["name"], input=tool_input)))
             elif block["type"] == "reasoning":
                 reasoning_text = ReasoningText(text=block["text"], signature=block["signature"])
                 contents.append(MessageContent(reasoning_content=ReasoningContent(reasoning_text=reasoning_text, redacted_content=block["redacted_content"])))
         message = Message(role=self.role, content=contents)
-        return ConverseResponse(output=ConverseOutput(message=message), stop_reason=self.stop_reason, usage=self.usage, metrics=self.metrics, trace=self.trace, performance_config=self.performance_config, additional_model_response_fields=self.additional_model_response_fields)
+        return ConverseResponse(output=ConverseOutput(message=message), stop_reason=self.stop_reason, truncated=truncated, usage=self.usage, metrics=self.metrics, trace=self.trace, performance_config=self.performance_config, additional_model_response_fields=self.additional_model_response_fields)
 
     def tool_input(self, block):
         if not block["input_text"]:
@@ -1540,10 +1554,16 @@ class ConverseAgent(Converse):
     # per-thread setup/teardown (e.g. closing a thread-local DB connection). Default runs fn directly.
     tool_thread_hook: Optional[Callable] = None
 
-    # A streamed tool call whose accumulated input fails to parse (a dropped/garbled Bedrock delta
-    # frame mid tool_use, despite content_block_stop) is unrepairable — its args would be guessed.
-    # The stream is re-requested this many times, emitting a stream_reset event before each retry.
+    # A streamed tool call whose accumulated input fails to parse on a normal stop_reason (a
+    # dropped/garbled Bedrock delta frame mid tool_use, despite content_block_stop) is unrepairable —
+    # its args would be guessed. The stream is re-requested this many times, emitting a stream_reset
+    # event before each retry. A max_tokens truncation is NOT corruption — it routes to continuation.
     stream_retries: int = 2
+
+    # When a turn stops on max_tokens (the output cap reached mid-answer or mid tool_use), the loop
+    # continues it instead of discarding it: any unparseable trailing tool_use is dropped, the partial
+    # turn is kept, and the model is asked to continue. Bounds the consecutive continuations per turn.
+    max_continuations: int = 4
 
     # When set, called as (tool_name, content) for each successful tool result, where content is the
     # List[ToolResultContent] about to be sent to the model. Returns replacement content to substitute
@@ -1553,7 +1573,9 @@ class ConverseAgent(Converse):
     interrupt_exceptions: tuple[type[BaseException], ...] = field(default_factory=tuple)
 
     def __post_init__(self):
-        super()._TO_DICT_EXCLUSIONS.extend(['max_iterations', 'exit_tool', 'auto_exit_tool', 'structured_output', 'debug', '_list_wrapped', '_on_text', 'suppress_text_during_loop', 'ref_registry', 'prompt_caching', 'cache_ttl', 'parallel_tools', 'tool_thread_hook', 'stream_retries', 'tool_result_hook', 'interrupt_exceptions'])
+        super()._TO_DICT_EXCLUSIONS.extend(['max_iterations', 'exit_tool', 'auto_exit_tool', 'structured_output', 'debug', '_list_wrapped', '_on_text', 'suppress_text_during_loop', 'ref_registry', 'prompt_caching', 'cache_ttl', 'parallel_tools', 'tool_thread_hook', 'stream_retries', 'max_continuations', 'tool_result_hook', 'interrupt_exceptions'])
+
+    CONTINUATION_PROMPT = "Your previous message was cut off because it reached the output token limit. Continue exactly where you left off — do not repeat anything you already wrote, and if you were in the middle of a tool call, re-issue it in full."
 
     def with_prompt_caching(self, ttl="5m"):
         self.prompt_caching = True
@@ -1740,6 +1762,14 @@ class ConverseAgent(Converse):
                 logger.warning(f"corrupt tool input, re-requesting stream (attempt {attempt + 1}/{self.stream_retries + 1}): {error}")
                 yield {"type": "stream_reset", "reason": "corrupt_tool_input"}
 
+    def continue_capped_turn(self):
+        partial = self.messages[-1]
+        partial.content = [c for c in partial.content if not c.is_unsigned_reasoning]
+        if partial.content:
+            self.messages.append(Message(role="user").add_text(self.CONTINUATION_PROMPT))
+        else:
+            self.messages.pop()
+
     def run_loop(self, message=None, max_iterations=None, first_tool_only=True, streaming=False):
         max_iterations = max_iterations or self.max_iterations
         self.ref_registry = {}
@@ -1754,6 +1784,7 @@ class ConverseAgent(Converse):
         for cb in self.callbacks:
             if hasattr(cb, 'on_run_start'):
                 cb.on_run_start(self)
+        continuations = 0
         for iteration in range(max_iterations):
             yield {"type": "iteration_start", "iteration": iteration}
             try:
@@ -1763,7 +1794,12 @@ class ConverseAgent(Converse):
                 result = "The response was interrupted before it completed. Please try again."
                 yield {"type": "done", "result": result, "corrupt_tool_input": True}
                 return self._fire_run_end(result)
+            capped = response.stop_reason == "max_tokens"
             if not response.output.message.content:
+                if capped and continuations < self.max_continuations:
+                    continuations += 1
+                    yield {"type": "max_tokens_continue", "continuation": continuations}
+                    continue
                 last_content_text = self.messages[-1].content[-1].text
                 logger.error(last_content_text)
                 yield {"type": "done", "result": last_content_text}
@@ -1774,6 +1810,11 @@ class ConverseAgent(Converse):
             self.messages.append(response.output.message)
             tool_results, exit_tool_results = yield from self.execute_tool_uses(response.output.message.content)
             if not tool_results:
+                if capped and continuations < self.max_continuations:
+                    continuations += 1
+                    self.continue_capped_turn()
+                    yield {"type": "max_tokens_continue", "continuation": continuations}
+                    continue
                 # Returning text ends the loop; a trailing assistant message would trigger
                 # "must end with user message" on the next API call.
                 text_parts = [c.text for c in response.output.message.content if c.text]
@@ -1785,6 +1826,7 @@ class ConverseAgent(Converse):
                 text = self.resolve_message_refs('\n'.join(text_parts)) if text_parts else None
                 yield {"type": "done", "result": text}
                 return self._fire_run_end(text)
+            continuations = 0
             tool_message = Message(role="user")
             for result in tool_results:
                 tool_message.content.append(MessageContent(tool_result=result))
