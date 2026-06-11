@@ -182,6 +182,8 @@ class ToolRegistry:
             hint = type_hints.get(key)
             if hint and isinstance(value, dict) and hasattr(hint, 'model_validate'):
                 validated_args[key] = hint.model_validate(value)
+            elif hint and get_origin(hint) is list and value is not None and not isinstance(value, (list, tuple)):
+                validated_args[key] = [value]
             else:
                 validated_args[key] = value
 
