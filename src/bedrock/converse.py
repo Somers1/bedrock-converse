@@ -725,7 +725,6 @@ class ConverseCost:
     usage: TokenUsage
     model_id: str
 
-    # Merged pricing from all sources (talos has most complete list)
     MODELS = [
         ModelCost(model_name='claude-sonnet-4', input=0.003, output=0.015, cached_write=0.00375, cached_read=0.0003),
         ModelCost(model_name='claude-opus-4', input=0.005, output=0.025, cached_write=0.00625, cached_read=0.0005),

@@ -88,7 +88,7 @@ class TestEMFMetricsCallback(unittest.TestCase):
         with patch('sys.stdout', new_callable=StringIO) as mock_out:
             cb.on_converse_end(resp)
             data = json.loads(mock_out.getvalue())
-        self.assertEqual(data["_aws"]["CloudWatchMetrics"][0]["Namespace"], "Talos/TokenUsage")
+        self.assertEqual(data["_aws"]["CloudWatchMetrics"][0]["Namespace"], "TokenUsage")
 
 
 if __name__ == '__main__':
