@@ -528,7 +528,7 @@ class OutputConfig(ToDictMixin):
     """
     _SKIP_CAMEL_CASE = True
 
-    effort: Literal["low", "medium", "high"] = "medium"
+    effort: Literal["low", "medium", "high", "xhigh", "max"] = "medium"
 
 
 @dataclass
@@ -1233,7 +1233,7 @@ class Converse(ToDictMixin, FromDictMixin):
             self.inference_config.top_p = None
         return self
 
-    def with_adaptive_thinking(self, effort: Literal["low", "medium", "high"] = "medium", display: Literal["summarized", "omitted"] = "summarized"):
+    def with_adaptive_thinking(self, effort: Literal["low", "medium", "high", "xhigh", "max"] = "medium", display: Literal["summarized", "omitted"] = "summarized"):
         if self.additional_model_request_fields is None:
             self.additional_model_request_fields = AdditionalModelRequestFields()
         self.additional_model_request_fields.thinking = ThinkingConfig(type="adaptive", display=display)
