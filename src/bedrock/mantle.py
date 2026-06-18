@@ -18,6 +18,19 @@ logger = logging.getLogger(__name__)
 STOP_REASON_MAP = {'stop': 'end_turn', 'length': 'max_tokens', 'tool_calls': 'tool_use'}
 
 
+def token_usage_from_openai(usage):
+    if not usage:
+        return TokenUsage()
+    details = getattr(usage, 'prompt_tokens_details', None) or getattr(usage, 'input_tokens_details', None)
+    cache_read = (getattr(details, 'cached_tokens', 0) or 0) if details else 0
+    input_tokens = getattr(usage, 'prompt_tokens', None)
+    input_tokens = getattr(usage, 'input_tokens', 0) if input_tokens is None else input_tokens
+    output_tokens = getattr(usage, 'completion_tokens', None)
+    output_tokens = getattr(usage, 'output_tokens', 0) if output_tokens is None else output_tokens
+    return TokenUsage(input_tokens=(input_tokens or 0) - cache_read, output_tokens=output_tokens or 0,
+                      total_tokens=getattr(usage, 'total_tokens', 0) or 0, cache_read_input_tokens=cache_read)
+
+
 class _MantleTransport:
     api_key: Optional[str] = None
     base_url: Optional[str] = None
@@ -247,19 +260,10 @@ class _MantleTransport:
                 try: args = json.loads(args)
                 except json.JSONDecodeError: args = {"raw_input": args}
             content.append(MessageContent(tool_use=ToolUse(tool_use_id=tc.id, name=tc.function.name, input=args)))
-        usage = completion.usage
-        cache_read = 0
-        if usage:
-            details = getattr(usage, 'prompt_tokens_details', None)
-            if details:
-                cache_read = getattr(details, 'cached_tokens', 0) or 0
         return ConverseResponse(
             output=ConverseOutput(message=Message(role='assistant', content=content)),
             stop_reason=STOP_REASON_MAP.get(choice.finish_reason or '', 'end_turn'),
-            usage=TokenUsage(input_tokens=usage.prompt_tokens if usage else 0,
-                             output_tokens=usage.completion_tokens if usage else 0,
-                             total_tokens=usage.total_tokens if usage else 0,
-                             cache_read_input_tokens=cache_read),
+            usage=token_usage_from_openai(completion.usage),
             metrics=ConverseMetrics(latency_ms=latency_ms))
 
     def _consume_stream(self, stream, start) -> ConverseResponse:
@@ -438,20 +442,7 @@ class _MantleTransport:
             metrics=ConverseMetrics(latency_ms=int((time.time() - start) * 1000)))
 
     def _stream_usage_obj(self):
-        usage = self._stream_usage
-        cache_read = 0
-        details = None
-        if usage:
-            details = getattr(usage, 'prompt_tokens_details', None) or getattr(usage, 'input_tokens_details', None)
-        if details:
-            cache_read = getattr(details, 'cached_tokens', 0) or 0
-        input_tokens = getattr(usage, 'prompt_tokens', None) if usage else None
-        output_tokens = getattr(usage, 'completion_tokens', None) if usage else None
-        return TokenUsage(
-            input_tokens=input_tokens if input_tokens is not None else getattr(usage, 'input_tokens', 0) if usage else 0,
-            output_tokens=output_tokens if output_tokens is not None else getattr(usage, 'output_tokens', 0) if usage else 0,
-            total_tokens=getattr(usage, 'total_tokens', 0) if usage else 0,
-            cache_read_input_tokens=cache_read)
+        return token_usage_from_openai(self._stream_usage)
 
     def stream(self, messages=None):
         for callback in self.callbacks:
@@ -564,19 +555,10 @@ class _MantleTransport:
                 except (json.JSONDecodeError, ValueError): args = {"raw_input": args}
                 content.append(MessageContent(tool_use=ToolUse(tool_use_id=tc['id'], name=tc['name'], input=args)))
 
-            cache_read = 0
-            if usage:
-                details = getattr(usage, 'prompt_tokens_details', None)
-                if details: cache_read = getattr(details, 'cached_tokens', 0) or 0
-
             response = ConverseResponse(
                 output=ConverseOutput(message=Message(role='assistant', content=content)),
                 stop_reason=STOP_REASON_MAP.get(finish_reason or '', 'end_turn'),
-                usage=TokenUsage(
-                    input_tokens=getattr(usage, 'prompt_tokens', 0) if usage else 0,
-                    output_tokens=getattr(usage, 'completion_tokens', 0) if usage else 0,
-                    total_tokens=getattr(usage, 'total_tokens', 0) if usage else 0,
-                    cache_read_input_tokens=cache_read),
+                usage=token_usage_from_openai(usage),
                 metrics=ConverseMetrics(latency_ms=int((time.time() - start) * 1000)))
         except Exception as error:
             for callback in self.callbacks:
