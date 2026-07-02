@@ -961,8 +961,7 @@ class Converse(ToDictMixin, FromDictMixin):
     cache_key: Optional[str] = None
     _TO_DICT_EXCLUSIONS = ['region_name', '_client', 'callbacks', 'aws_access_key_id', 'aws_secret_access_key',
                            '_async_client', 'tool_registry', 'cache_key']
-    CACHE_SUPPORTED_MODELS = ['claude-3-5-haiku', 'claude-3-7-sonnet', 'amazon.nova', 'claude-sonnet-4',
-                              'claude-opus-4', 'claude-haiku-4', 'claude-haiku-4-5']
+    CACHE_SUPPORTED_MODELS = ['claude', 'nova']
 
     def add_message(self):
         message = Message()
