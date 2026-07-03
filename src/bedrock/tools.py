@@ -116,6 +116,8 @@ def python_type_to_json_schema(python_type) -> dict:
             if isinstance(schema, dict):
                 return schema
             return {"type": schema}
+        members = [python_type_to_json_schema(arg) for arg in args if arg is not type(None)]
+        return {"anyOf": members}
 
     if origin is list:
         args = get_args(python_type)
