@@ -390,7 +390,7 @@ class CachePoint(ToDictMixin):
 @dataclass
 class ReasoningText(ToDictMixin, FromDictMixin):
     text: str
-    signature: str
+    signature: Optional[str] = None
 
 
 @dataclass
