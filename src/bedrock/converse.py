@@ -614,18 +614,16 @@ class Message(ToDictMixin, FromDictMixin):
         split_name = name.split('.')
         document_format = split_name[-1].lower()
         name = '_'.join(split_name[:-1])
-        document = Document(format=document_format, name=name, source=FileSource(bytes=source))
+        try:
+            document = Document(format=document_format, name=name, source=FileSource(bytes=source))
+        except InvalidFormat as e:
+            if not skip_on_invalid:
+                raise
+            logger.warning(f'Could not add document to prompt {name} is invalid: {e}')
+            return self
         if document.name in self.get_document_names():
             document.name += f'_{uuid.uuid4().hex[:6]}'
-        if not skip_on_invalid:
-            self.content.append(MessageContent(document=document))
-        else:
-            try:
-                self.content.append(
-                    MessageContent(
-                        document=Document(format=document_format, name=name, source=FileSource(bytes=source))))
-            except InvalidFormat as e:
-                logger.warning(f'Could not add document to prompt {name} is invalid: {e}')
+        self.content.append(MessageContent(document=document))
         return self
 
     def add_video(self, video):
