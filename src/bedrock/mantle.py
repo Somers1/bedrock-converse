@@ -3,6 +3,7 @@ import json
 import logging
 import os
 import time
+import uuid
 from dataclasses import dataclass
 from functools import cached_property
 from typing import Optional
@@ -16,6 +17,10 @@ from .converse import (Converse, ConverseAgent, StructuredConverse, ConverseResp
 logger = logging.getLogger(__name__)
 
 STOP_REASON_MAP = {'stop': 'end_turn', 'length': 'max_tokens', 'tool_calls': 'tool_use'}
+
+
+def new_tool_use_id():
+    return f'tooluse_{uuid.uuid4().hex}'
 
 
 def token_usage_from_openai(usage):
@@ -259,7 +264,7 @@ class _MantleTransport:
             if isinstance(args, str):
                 try: args = json.loads(args)
                 except json.JSONDecodeError: args = {"raw_input": args}
-            content.append(MessageContent(tool_use=ToolUse(tool_use_id=tc.id, name=tc.function.name, input=args)))
+            content.append(MessageContent(tool_use=ToolUse(tool_use_id=new_tool_use_id(), name=tc.function.name, input=args)))
         return ConverseResponse(
             output=ConverseOutput(message=Message(role='assistant', content=content)),
             stop_reason=STOP_REASON_MAP.get(choice.finish_reason or '', 'end_turn'),
@@ -362,15 +367,13 @@ class _MantleTransport:
     def _stream_tool_deltas(self, delta):
         for tc in (delta.tool_calls or []):
             index = self._stream_block_index(f"tool:{tc.index}")
-            tool_call = self._stream_tool_calls.setdefault(index, {'id': '', 'name': '', 'arguments': ''})
-            if tc.id:
-                tool_call['id'] = tc.id
+            tool_call = self._stream_tool_calls.setdefault(index, {'id': new_tool_use_id(), 'name': '', 'arguments': ''})
             if tc.function:
                 if tc.function.name:
                     tool_call['name'] = tc.function.name
                 if tc.function.arguments:
                     tool_call['arguments'] += tc.function.arguments
-            if tool_call['id'] and tool_call['name']:
+            if tool_call['name']:
                 yield from self._start_content_block(index, "tool_use", tool_use_id=tool_call['id'], name=tool_call['name'])
             if index in self._stream_started_blocks and tc.function and tc.function.arguments:
                 yield {"type": "tool_use_input_delta", "index": index, "partial_json": tc.function.arguments}
@@ -392,13 +395,12 @@ class _MantleTransport:
         if getattr(item, 'type', None) != 'function_call':
             return []
         index = self._stream_block_index(f"tool:{item.id or item.call_id}")
-        tool_call = self._stream_tool_calls.setdefault(index, {'id': '', 'name': '', 'arguments': ''})
+        tool_call = self._stream_tool_calls.setdefault(index, {'id': new_tool_use_id(), 'name': '', 'arguments': ''})
         previous_arguments = tool_call['arguments']
-        tool_call['id'] = item.call_id or tool_call['id']
         tool_call['name'] = item.name or tool_call['name']
         if item.arguments and not tool_call['arguments']:
             tool_call['arguments'] = item.arguments
-        if tool_call['id'] and tool_call['name']:
+        if tool_call['name']:
             yield from self._start_content_block(index, "tool_use", tool_use_id=tool_call['id'], name=tool_call['name'])
         if index in self._stream_started_blocks and tool_call['arguments'] and not previous_arguments:
             yield {"type": "tool_use_input_delta", "index": index, "partial_json": tool_call['arguments']}
@@ -536,8 +538,7 @@ class _MantleTransport:
                 for tc in (delta.tool_calls or []):
                     idx = tc.index
                     if idx not in tool_calls_map:
-                        tool_calls_map[idx] = {'id': tc.id or '', 'name': '', 'arguments': ''}
-                    if tc.id: tool_calls_map[idx]['id'] = tc.id
+                        tool_calls_map[idx] = {'id': new_tool_use_id(), 'name': '', 'arguments': ''}
                     if tc.function:
                         if tc.function.name: tool_calls_map[idx]['name'] = tc.function.name
                         if tc.function.arguments: tool_calls_map[idx]['arguments'] += tc.function.arguments

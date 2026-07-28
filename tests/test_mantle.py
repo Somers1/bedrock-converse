@@ -209,6 +209,24 @@ class TestMantleInvoke(unittest.TestCase):
         self.assertEqual(resp.stop_reason, "tool_use")
         self.assertEqual(resp.output.message.content[0].tool_use.name, "my_tool")
 
+    def test_tool_ids_unique_across_replies(self):
+        m, client = self._make_mantle()
+        ids = []
+        for _ in range(2):
+            client.chat.completions.create.return_value = _mock_stream(
+                tool_calls=[_tool_call("my_tool", {"key": "value"}, call_id="my_tool:0")], finish_reason="tool_calls")
+            ids.append(m.invoke("Use tool").output.message.content[0].tool_use.tool_use_id)
+        self.assertNotEqual(ids[0], ids[1])
+        self.assertTrue(all(tool_id.startswith("tooluse_") for tool_id in ids))
+
+    def test_tool_ids_unique_within_reply(self):
+        m, client = self._make_mantle()
+        client.chat.completions.create.return_value = _mock_stream(
+            tool_calls=[_tool_call("my_tool", {"key": "a"}, call_id="my_tool:0"),
+                        _tool_call("my_tool", {"key": "b"}, call_id="my_tool:0")], finish_reason="tool_calls")
+        ids = [part.tool_use.tool_use_id for part in m.invoke("Use tool").output.message.content if part.tool_use]
+        self.assertEqual(len(set(ids)), 2)
+
     def test_system_prompts_in_params(self):
         m, client = self._make_mantle()
         m.add_system("Be helpful")
