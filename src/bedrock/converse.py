@@ -1245,7 +1245,8 @@ class Converse(ToDictMixin, FromDictMixin):
     def structured_output_class(self):
         return structured_model_factory(self.model_id)
 
-    def with_structured_output(self, output_model, force_choice=True, skip_add_tool=False, first_tool_only=True):
+    def with_structured_output(self, output_model, force_choice=True, skip_add_tool=False, first_tool_only=True,
+                               schema_in_message=False):
         assert not (skip_add_tool is True and len(
             self.tool_config.tools) == 0), "If you skip_add_tool you must add tools manually using bind_tools."
 
@@ -1275,8 +1276,15 @@ class Converse(ToDictMixin, FromDictMixin):
             output_model=output_model,
             force_choice=force_choice,
             skip_add_tool=skip_add_tool,
-            first_tool_only=first_tool_only
+            first_tool_only=first_tool_only,
+            schema_in_message=schema_in_message
         )
+
+
+RESPOND_TOOL = Tool(tool_spec=ToolSpec(
+    name='Respond',
+    description='Return your answer: a JSON object matching exactly the schema given in the conversation.',
+    input_schema={'json': {'type': 'object'}}))
 
 
 @dataclass
@@ -1285,19 +1293,36 @@ class StructuredConverse(Converse):
     force_choice: bool = True
     skip_add_tool: bool = False
     first_tool_only: bool = True
+    schema_in_message: bool = False
     backup_model: Optional[Union[str, 'Converse']] = None
 
     def __post_init__(self):
-        super()._TO_DICT_EXCLUSIONS.extend(['output_model', 'force_choice', 'skip_add_tool', 'first_tool_only', 'backup_model'])
+        super()._TO_DICT_EXCLUSIONS.extend(['output_model', 'force_choice', 'skip_add_tool', 'first_tool_only', 'schema_in_message', 'backup_model'])
         if self.output_model is None:
             raise ValueError(f'Need to specify output_model for StructuredConverse')
-        if not self.skip_add_tool:
+        if self.schema_in_message:
+            if self.tool_config is None:
+                self.tool_config = ConverseToolConfig()
+            if RESPOND_TOOL.tool_spec.name not in self.current_tool_names:
+                self.tool_config.tools.append(RESPOND_TOOL)
+        elif not self.skip_add_tool:
             self.add_tool(self.output_model)
+        tool_name = RESPOND_TOOL.tool_spec.name if self.schema_in_message else self.output_model.__name__
         # Thinking cannot be used with forced tool choice
         if self.force_choice and any(m in self.model_id for m in ('claude', 'kimi')) and not self.thinking_enabled:
-            self.set_tool_choice(self.output_model.__name__)
+            self.set_tool_choice(tool_name)
         if self.thinking_enabled:
-            self.add_system(f'You are in Structured Output mode. You MUST call the {self.output_model.__name__} as your final response.')
+            self.add_system(f'You are in Structured Output mode. You MUST call the {tool_name} as your final response.')
+
+    def schema_instruction(self):
+        return f'Call the {RESPOND_TOOL.tool_spec.name} tool with a JSON object matching this schema exactly:\n{json.dumps(self.output_model.model_json_schema())}'
+
+    def _format_invoke_message(self, message):
+        if self.schema_in_message:
+            if isinstance(message, str):
+                message = Message().add_text(message)
+            message = Message(content=[*message.content], role=message.role).add_text(self.schema_instruction(), tag='response_schema')
+        return super()._format_invoke_message(message)
 
     def with_backup_model(self, model: Union[str, 'Converse']):
         """
