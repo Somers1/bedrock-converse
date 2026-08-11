@@ -600,6 +600,9 @@ class MantleAgent(_MantleTransport, ConverseAgent):
     base_url: Optional[str] = None
     api_mode: str = 'chat_completions'
 
+    def prune_dangling_reasoning(self):
+        pass
+
 
 @dataclass
 class StructuredMantle(_MantleTransport, StructuredConverse):
