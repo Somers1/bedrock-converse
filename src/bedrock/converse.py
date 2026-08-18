@@ -35,6 +35,7 @@ _PIL_WARNING_LOGGED = False
 
 from .tools import tool as agent_tool, Tools
 from .bases import BaseCallbackHandler
+from .cassette import Cassette
 
 logger = logging.getLogger(__name__)
 
@@ -988,9 +989,17 @@ class Converse(ToDictMixin, FromDictMixin):
             return boto3.Session(region_name=self.region_name)
 
     @property
+    def bedrock_client(self):
+        return self.session.client('bedrock-runtime', config=Config(read_timeout=180))
+
+    @property
+    def cassette_key(self):
+        return self.model_id.rpartition('.')[2]
+
+    @property
     def client(self):
         if self._client is None:
-            self._client = self.session.client('bedrock-runtime', config=Config(read_timeout=180))
+            self._client = Cassette.wrap(self)
         return self._client
 
     def _format_invoke_message(self, message):
@@ -1286,6 +1295,10 @@ class StructuredConverse(Converse):
     skip_add_tool: bool = False
     first_tool_only: bool = True
     backup_model: Optional[Union[str, 'Converse']] = None
+
+    @property
+    def cassette_key(self):
+        return self.output_model.__name__
 
     def __post_init__(self):
         super()._TO_DICT_EXCLUSIONS.extend(['output_model', 'force_choice', 'skip_add_tool', 'first_tool_only', 'backup_model'])

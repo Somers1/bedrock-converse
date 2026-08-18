@@ -13,6 +13,7 @@ from .embedding import (
     VectorItem, VectorResponse
 )
 from .bases import BaseCallbackHandler
+from .cassette import Cassette
 from .callbacks import PrintCallback
 
 try:
