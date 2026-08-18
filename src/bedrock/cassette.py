@@ -21,13 +21,13 @@ class Cassette:
 
     @property
     def path(self):
-        return self.directory / f'{self.caller.cassette_key}.json'
+        return self.directory / self.caller.cassette_scope / f'{self.caller.cassette_key}.json'
 
     def converse(self, **payload):
         return self.record(payload) if self.mode == self.RECORD else json.loads(self.path.read_text())['response']
 
     def record(self, payload):
         response = self.caller.bedrock_client.converse(**payload)
-        self.directory.mkdir(parents=True, exist_ok=True)
+        self.path.parent.mkdir(parents=True, exist_ok=True)
         self.path.write_text(json.dumps({'model_id': self.caller.model_id, 'response': response}, indent=2, default=str))
         return response

@@ -958,8 +958,9 @@ class Converse(ToDictMixin, FromDictMixin):
     _async_client: boto3.client = None
     tool_registry: ToolRegistry = field(default_factory=ToolRegistry)
     cache_key: Optional[str] = None
+    cassette_scope: str = ''
     _TO_DICT_EXCLUSIONS = ['region_name', '_client', 'callbacks', 'aws_access_key_id', 'aws_secret_access_key',
-                           '_async_client', 'tool_registry', 'cache_key']
+                           '_async_client', 'tool_registry', 'cache_key', 'cassette_scope']
     CACHE_SUPPORTED_MODELS = ['claude', 'nova']
 
     def add_message(self):
