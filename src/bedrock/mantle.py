@@ -40,6 +40,7 @@ class _MantleTransport:
     api_key: Optional[str] = None
     base_url: Optional[str] = None
     api_mode: str = 'chat_completions'
+    extra_params: Optional[dict] = None
 
     @property
     def _mantle_base_url(self):
@@ -123,6 +124,8 @@ class _MantleTransport:
         self._build_thinking_params(params)
         if self.cache_key:
             params['prompt_cache_key'] = self.cache_key
+        if self.extra_params:
+            params['extra_body'] = dict(self.extra_params)
         return params
 
     def _build_params(self, messages=None) -> dict:
@@ -151,6 +154,8 @@ class _MantleTransport:
             response_params['reasoning'] = {'effort': effort, 'summary': 'auto'}
         if cache_key := params.get('prompt_cache_key'):
             response_params['prompt_cache_key'] = cache_key
+        if extra_body := params.get('extra_body'):
+            response_params['extra_body'] = extra_body
         return response_params
 
     def _responses_tools(self, tools):
@@ -504,6 +509,10 @@ class _MantleTransport:
             except Exception as e: logger.warning(f"Callback error: {e}")
         return response
 
+    def with_extra_params(self, params):
+        self.extra_params = {**(self.extra_params or {}), **params}
+        return self
+
     def with_thinking(self, tokens: int | str = 1024, enabled: bool = True):
         thinking_config = ThinkingConfig(
             type="enabled" if enabled else "disabled",
@@ -609,6 +618,7 @@ class Mantle(_MantleTransport, Converse):
     api_key: Optional[str] = None
     base_url: Optional[str] = None
     api_mode: str = 'chat_completions'
+    extra_params: Optional[dict] = None
 
     @property
     def structured_output_class(self):
@@ -627,6 +637,7 @@ class MantleAgent(_MantleTransport, ConverseAgent):
     api_key: Optional[str] = None
     base_url: Optional[str] = None
     api_mode: str = 'chat_completions'
+    extra_params: Optional[dict] = None
 
     def prune_dangling_reasoning(self):
         pass
@@ -637,3 +648,4 @@ class StructuredMantle(_MantleTransport, StructuredConverse):
     api_key: Optional[str] = None
     base_url: Optional[str] = None
     api_mode: str = 'chat_completions'
+    extra_params: Optional[dict] = None
