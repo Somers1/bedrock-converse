@@ -131,7 +131,8 @@ class _MantleTransport:
 
     def _build_responses_params(self, messages=None):
         params = self._build_params(messages)
-        response_params = {'model': params['model'], 'input': self._responses_input(params['messages']), 'store': False}
+        response_params = {'model': params['model'], 'input': self._responses_input(params['messages']), 'store': False,
+                           'include': ['reasoning.encrypted_content']}
         if tools := params.get('tools'):
             response_params['tools'] = self._responses_tools(tools)
         if tool_choice := self._responses_tool_choice(params.get('tool_choice')):
@@ -167,6 +168,8 @@ class _MantleTransport:
                 items.append({'type': 'function_call_output', 'call_id': message['tool_call_id'], 'output': message.get('content') or ''})
                 continue
             if message['role'] == 'assistant':
+                if reasoning_item := message.get('reasoning_item'):
+                    items.append(reasoning_item)
                 if message.get('content'):
                     items.append({'type': 'message', 'role': 'assistant', 'content': message['content']})
                 items.extend(self._responses_function_calls(message.get('tool_calls') or []))
@@ -206,17 +209,19 @@ class _MantleTransport:
 
     def _convert_assistant(self, content_list):
         openai_msg = {'role': 'assistant'}
-        texts, tool_calls, reasoning = [], [], []
+        texts, tool_calls, reasoning, reasoning_item = [], [], [], None
         for c in content_list:
             if c.text: texts.append(c.text)
             elif c.tool_use:
                 tool_calls.append({'id': c.tool_use.tool_use_id, 'type': 'function',
                     'function': {'name': c.tool_use.name, 'arguments': json.dumps(c.tool_use.input) if isinstance(c.tool_use.input, dict) else str(c.tool_use.input)}})
-            elif c.reasoning_content and c.reasoning_content.reasoning_text:
-                reasoning.append(c.reasoning_content.reasoning_text.text)
+            elif c.reasoning_content:
+                if c.reasoning_content.reasoning_text: reasoning.append(c.reasoning_content.reasoning_text.text)
+                reasoning_item = c.reasoning_content.responses_item or reasoning_item
         if texts: openai_msg['content'] = '\n'.join(texts)
         if tool_calls: openai_msg['tool_calls'] = tool_calls
         if reasoning: openai_msg['reasoning_content'] = '\n'.join(reasoning)
+        if reasoning_item and self.uses_responses_api: openai_msg['reasoning_item'] = reasoning_item
         return [openai_msg]
 
     def _convert_user(self, content_list):
@@ -284,6 +289,7 @@ class _MantleTransport:
     def _start_stream(self):
         self._stream_text_parts = []
         self._stream_reasoning_parts = []
+        self._stream_reasoning_item = None
         self._stream_tool_calls = {}
         self._stream_started_blocks = set()
         self._stream_block_indexes = {}
@@ -321,6 +327,7 @@ class _MantleTransport:
                 yield from self._responses_output_item(event.item)
             elif event_type == 'response.output_item.done':
                 yield from self._responses_output_item(event.item)
+                self._capture_responses_reasoning(event.item)
             elif event_type == 'response.function_call_arguments.delta':
                 yield from self._responses_function_call_arguments_delta(event)
             elif event_type == 'response.completed':
@@ -391,6 +398,10 @@ class _MantleTransport:
         self._stream_reasoning_parts.append(event.delta)
         yield {"type": "reasoning_delta", "index": index, "reasoning": {"text": event.delta}}
 
+    def _capture_responses_reasoning(self, item):
+        if getattr(item, 'type', None) == 'reasoning' and getattr(item, 'encrypted_content', None):
+            self._stream_reasoning_item = item.model_dump(exclude_none=True)
+
     def _responses_output_item(self, item):
         if getattr(item, 'type', None) != 'function_call':
             return []
@@ -413,6 +424,8 @@ class _MantleTransport:
             yield {"type": "tool_use_input_delta", "index": index, "partial_json": event.delta}
 
     def _responses_completed(self, response):
+        for item in response.output:
+            self._capture_responses_reasoning(item)
         self._stream_usage = response.usage
         self._stream_finish_reason = self._responses_stop_reason(response)
 
@@ -425,9 +438,10 @@ class _MantleTransport:
 
     def _stream_response(self, start) -> ConverseResponse:
         content = []
-        if self._stream_reasoning_parts:
+        if self._stream_reasoning_parts or self._stream_reasoning_item:
+            reasoning_text = ReasoningText(text=''.join(self._stream_reasoning_parts), signature='') if self._stream_reasoning_parts else None
             content.append(MessageContent(reasoning_content=ReasoningContent(
-                reasoning_text=ReasoningText(text=''.join(self._stream_reasoning_parts), signature=''), redacted_content=None)))
+                reasoning_text=reasoning_text, responses_item=self._stream_reasoning_item)))
         if text := ''.join(self._stream_text_parts):
             content.append(MessageContent(text=text))
         for index in sorted(self._stream_tool_calls):
