@@ -40,6 +40,7 @@ class _MantleTransport:
     api_key: Optional[str] = None
     base_url: Optional[str] = None
     api_mode: str = 'chat_completions'
+    extra_params: Optional[dict] = None
 
     @property
     def _mantle_base_url(self):
@@ -112,26 +113,33 @@ class _MantleTransport:
         if effort := self.reasoning_effort:
             params['reasoning_effort'] = effort
 
-    def _build_params(self, messages=None) -> dict:
-        self.remove_invalid_caching(messages)
-        msgs = []
-        if self.system:
-            system_text = '\n'.join(s.text for s in self.system if s.text)
-            if system_text:
-                msgs.append({'role': 'system', 'content': system_text})
-        for msg in (messages or self.messages):
-            msgs.extend(self._convert_message(msg))
-        params = {'model': self.model_id, 'messages': msgs}
+    @property
+    def system_text(self):
+        return '\n'.join(s.text for s in (self.system or []) if s.text)
+
+    def _build_shared_params(self) -> dict:
+        params = {'model': self.model_id}
         self._build_tool_params(params)
         self._build_inference_params(params)
         self._build_thinking_params(params)
         if self.cache_key:
             params['prompt_cache_key'] = self.cache_key
+        if self.extra_params:
+            params['extra_body'] = dict(self.extra_params)
         return params
 
+    def _build_params(self, messages=None) -> dict:
+        self.remove_invalid_caching(messages)
+        msgs = [{'role': 'system', 'content': self.system_text}] if self.system_text else []
+        for msg in (messages or self.messages):
+            msgs.extend(self._convert_message(msg))
+        return {**self._build_shared_params(), 'messages': msgs}
+
     def _build_responses_params(self, messages=None):
-        params = self._build_params(messages)
-        response_params = {'model': params['model'], 'input': self._responses_input(params['messages']), 'store': False}
+        self.remove_invalid_caching(messages)
+        params = self._build_shared_params()
+        response_params = {'model': params['model'], 'input': self._responses_input(messages or self.messages), 'store': False,
+                           'include': ['reasoning.encrypted_content']}
         if tools := params.get('tools'):
             response_params['tools'] = self._responses_tools(tools)
         if tool_choice := self._responses_tool_choice(params.get('tool_choice')):
@@ -146,6 +154,8 @@ class _MantleTransport:
             response_params['reasoning'] = {'effort': effort, 'summary': 'auto'}
         if cache_key := params.get('prompt_cache_key'):
             response_params['prompt_cache_key'] = cache_key
+        if extra_body := params.get('extra_body'):
+            response_params['extra_body'] = extra_body
         return response_params
 
     def _responses_tools(self, tools):
@@ -161,48 +171,63 @@ class _MantleTransport:
         return None
 
     def _responses_input(self, messages):
-        items = []
-        for message in messages:
-            if message['role'] == 'tool':
-                items.append({'type': 'function_call_output', 'call_id': message['tool_call_id'], 'output': message.get('content') or ''})
-                continue
-            if message['role'] == 'assistant':
-                if message.get('content'):
-                    items.append({'type': 'message', 'role': 'assistant', 'content': message['content']})
-                items.extend(self._responses_function_calls(message.get('tool_calls') or []))
-                continue
-            items.append({'type': 'message', 'role': message['role'], 'content': self._responses_content(message.get('content') or '')})
+        items = [{'type': 'message', 'role': 'system', 'content': self.system_text}] if self.system_text else []
+        for msg in messages:
+            items.extend(self._responses_message_items(msg))
         return items
 
-    def _responses_function_calls(self, tool_calls):
-        return [{'type': 'function_call', 'call_id': tool_call['id'], 'name': tool_call['function']['name'],
-                 'arguments': tool_call['function']['arguments'], 'status': 'completed'} for tool_call in tool_calls]
+    def _responses_message_items(self, msg):
+        items = [{'type': 'function_call_output', 'call_id': c.tool_result.tool_use_id, 'output': self._tool_result_text(c.tool_result)}
+                 for c in msg.content if c.tool_result]
+        items.extend(self._responses_user_message([MessageContent(image=item.image) for c in msg.content if c.tool_result
+                                                   for item in c.tool_result.content if item.image]))
+        body = [c for c in msg.content if not c.tool_result and not c.cache_point]
+        if msg.role == 'assistant':
+            return items + [item for c in body for item in self._responses_assistant_item(c)]
+        return items + self._responses_user_message(body)
 
-    def _responses_content(self, content):
-        if isinstance(content, str):
-            return content
+    def _responses_assistant_item(self, c):
+        if c.reasoning_content:
+            return [c.reasoning_content.responses_item] if c.reasoning_content.responses_item else []
+        if c.tool_use:
+            return [{'type': 'function_call', 'call_id': c.tool_use.tool_use_id, 'name': c.tool_use.name,
+                     'arguments': self._tool_use_arguments(c.tool_use), 'status': 'completed'}]
+        return [{'type': 'message', 'role': 'assistant', 'content': c.text}] if c.text else []
+
+    def _responses_user_message(self, content_list):
+        parts = [part for c in content_list for part in self._responses_user_parts(c)]
+        return [{'type': 'message', 'role': 'user', 'content': parts}] if parts else []
+
+    def _responses_user_parts(self, c):
+        if c.text:
+            return [{'type': 'input_text', 'text': c.text}]
+        if c.image:
+            return [{'type': 'input_image', 'image_url': self._data_url(c.image.format, c.image.source.bytes), 'detail': 'auto'}]
+        if c.document:
+            return [{'type': 'input_text', 'text': self._document_text(c.document)}]
+        return []
+
+    def _data_url(self, media_format, raw):
+        return f'data:image/{media_format};base64,{base64.b64encode(raw).decode()}'
+
+    def _document_text(self, document):
+        return f'[Document: {document.name}.{document.format}]\n{base64.b64encode(document.source.bytes).decode()}'
+
+    def _tool_use_arguments(self, tool_use):
+        return json.dumps(tool_use.input) if isinstance(tool_use.input, dict) else str(tool_use.input)
+
+    def _tool_result_text(self, tool_result):
         parts = []
-        for part in content:
-            if part.get('type') == 'text':
-                parts.append({'type': 'input_text', 'text': part.get('text') or ''})
-            elif part.get('type') == 'image_url':
-                parts.append({'type': 'input_image', 'image_url': part['image_url']['url'], 'detail': 'auto'})
-        return parts
+        for trc in tool_result.content:
+            if trc.text: parts.append(trc.text)
+            elif trc.json is not None: parts.append(json.dumps(trc.json))
+            elif trc.image: parts.append('[image provided in the following message]')
+            elif trc.document: parts.append(f'[document: {trc.document.name}.{trc.document.format}]')
+        return '\n'.join(parts)
 
     def _convert_tool_results(self, content_list):
-        results = []
-        for c in content_list:
-            if not c.tool_result:
-                continue
-            tr = c.tool_result
-            parts = []
-            for trc in tr.content:
-                if trc.text: parts.append(trc.text)
-                elif trc.json is not None: parts.append(json.dumps(trc.json))
-                elif trc.image: parts.append('[image provided in the following message]')
-                elif trc.document: parts.append(f'[document: {trc.document.name}.{trc.document.format}]')
-            results.append({'role': 'tool', 'tool_call_id': tr.tool_use_id, 'content': '\n'.join(parts)})
-        return results
+        return [{'role': 'tool', 'tool_call_id': c.tool_result.tool_use_id, 'content': self._tool_result_text(c.tool_result)}
+                for c in content_list if c.tool_result]
 
     def _convert_assistant(self, content_list):
         openai_msg = {'role': 'assistant'}
@@ -211,7 +236,7 @@ class _MantleTransport:
             if c.text: texts.append(c.text)
             elif c.tool_use:
                 tool_calls.append({'id': c.tool_use.tool_use_id, 'type': 'function',
-                    'function': {'name': c.tool_use.name, 'arguments': json.dumps(c.tool_use.input) if isinstance(c.tool_use.input, dict) else str(c.tool_use.input)}})
+                    'function': {'name': c.tool_use.name, 'arguments': self._tool_use_arguments(c.tool_use)}})
             elif c.reasoning_content and c.reasoning_content.reasoning_text:
                 reasoning.append(c.reasoning_content.reasoning_text.text)
         if texts: openai_msg['content'] = '\n'.join(texts)
@@ -225,11 +250,9 @@ class _MantleTransport:
             if c.text: parts.append({'type': 'text', 'text': c.text})
             elif c.image:
                 has_multimodal = True
-                b64 = base64.b64encode(c.image.source.bytes).decode()
-                parts.append({'type': 'image_url', 'image_url': {'url': f'data:image/{c.image.format};base64,{b64}'}})
+                parts.append({'type': 'image_url', 'image_url': {'url': self._data_url(c.image.format, c.image.source.bytes)}})
             elif c.document:
-                b64 = base64.b64encode(c.document.source.bytes).decode()
-                parts.append({'type': 'text', 'text': f'[Document: {c.document.name}.{c.document.format}]\n{b64}'})
+                parts.append({'type': 'text', 'text': self._document_text(c.document)})
         if not parts:
             return []
         if has_multimodal or len(parts) > 1:
@@ -282,9 +305,7 @@ class _MantleTransport:
         return self._stream_response(start)
 
     def _start_stream(self):
-        self._stream_text_parts = []
-        self._stream_reasoning_parts = []
-        self._stream_tool_calls = {}
+        self._stream_output = {}
         self._stream_started_blocks = set()
         self._stream_block_indexes = {}
         self._stream_block_order = []
@@ -318,9 +339,10 @@ class _MantleTransport:
             elif event_type in ('response.reasoning_text.delta', 'response.reasoning_summary_text.delta'):
                 yield from self._responses_reasoning_delta(event)
             elif event_type == 'response.output_item.added':
-                yield from self._responses_output_item(event.item)
+                yield from self._responses_output_item(event.item, event.output_index)
             elif event_type == 'response.output_item.done':
-                yield from self._responses_output_item(event.item)
+                yield from self._responses_output_item(event.item, event.output_index)
+                self._capture_responses_reasoning(event.item, event.output_index)
             elif event_type == 'response.function_call_arguments.delta':
                 yield from self._responses_function_call_arguments_delta(event)
             elif event_type == 'response.completed':
@@ -335,6 +357,10 @@ class _MantleTransport:
         yield {"type": "message_stop", "stop_reason": STOP_REASON_MAP.get(self._stream_finish_reason or '', self._stream_finish_reason or 'end_turn')}
         yield {"type": "metadata", "usage": self._stream_usage_obj(), "metrics": None}
 
+    def _stream_item(self, key, kind, **initial):
+        self._stream_block_index(key)
+        return self._stream_output.setdefault(key, {'kind': kind, **initial})
+
     def _stream_block_index(self, key):
         if key not in self._stream_block_indexes:
             self._stream_block_indexes[key] = len(self._stream_block_order)
@@ -347,27 +373,32 @@ class _MantleTransport:
         self._stream_started_blocks.add(index)
         return [{"type": "content_block_start", "index": index, "block_type": block_type, **kwargs}]
 
-    def _stream_text_delta(self, delta):
-        if not delta.content:
-            return
-        index = self._stream_block_index("text")
+    def _emit_text(self, key, text):
+        item = self._stream_item(key, 'text', parts=[])
+        index = self._stream_block_indexes[key]
         yield from self._start_content_block(index, "text")
-        self._stream_text_parts.append(delta.content)
-        yield {"type": "text_delta", "index": index, "text": delta.content}
+        item['parts'].append(text)
+        yield {"type": "text_delta", "index": index, "text": text}
+
+    def _emit_reasoning(self, key, text):
+        item = self._stream_item(key, 'reasoning', parts=[], responses_item=None)
+        index = self._stream_block_indexes[key]
+        yield from self._start_content_block(index, "reasoning")
+        item['parts'].append(text)
+        yield {"type": "reasoning_delta", "index": index, "reasoning": {"text": text}}
+
+    def _stream_text_delta(self, delta):
+        if delta.content:
+            yield from self._emit_text("text", delta.content)
 
     def _stream_reasoning_delta(self, delta):
-        reasoning = getattr(delta, 'reasoning', None) or getattr(delta, 'reasoning_content', None)
-        if not reasoning:
-            return
-        index = self._stream_block_index("reasoning")
-        yield from self._start_content_block(index, "reasoning")
-        self._stream_reasoning_parts.append(reasoning)
-        yield {"type": "reasoning_delta", "index": index, "reasoning": {"text": reasoning}}
+        if reasoning := (getattr(delta, 'reasoning', None) or getattr(delta, 'reasoning_content', None)):
+            yield from self._emit_reasoning("reasoning", reasoning)
 
     def _stream_tool_deltas(self, delta):
         for tc in (delta.tool_calls or []):
-            index = self._stream_block_index(f"tool:{tc.index}")
-            tool_call = self._stream_tool_calls.setdefault(index, {'id': new_tool_use_id(), 'name': '', 'arguments': ''})
+            tool_call = self._stream_item(f"tool:{tc.index}", 'tool', id=new_tool_use_id(), name='', arguments='')
+            index = self._stream_block_indexes[f"tool:{tc.index}"]
             if tc.function:
                 if tc.function.name:
                     tool_call['name'] = tc.function.name
@@ -379,23 +410,22 @@ class _MantleTransport:
                 yield {"type": "tool_use_input_delta", "index": index, "partial_json": tc.function.arguments}
 
     def _responses_text_delta(self, event):
-        index = self._stream_block_index(f"text:{event.output_index}:{event.content_index}")
-        yield from self._start_content_block(index, "text")
-        self._stream_text_parts.append(event.delta)
-        yield {"type": "text_delta", "index": index, "text": event.delta}
+        yield from self._emit_text(f"text:{event.output_index}:{event.content_index}", event.delta)
 
     def _responses_reasoning_delta(self, event):
-        part_index = getattr(event, 'content_index', getattr(event, 'summary_index', 0))
-        index = self._stream_block_index(f"reasoning:{event.output_index}:{part_index}")
-        yield from self._start_content_block(index, "reasoning")
-        self._stream_reasoning_parts.append(event.delta)
-        yield {"type": "reasoning_delta", "index": index, "reasoning": {"text": event.delta}}
+        yield from self._emit_reasoning(f"reasoning:{event.output_index}", event.delta)
 
-    def _responses_output_item(self, item):
+    def _capture_responses_reasoning(self, item, output_index):
+        if getattr(item, 'type', None) != 'reasoning' or not getattr(item, 'encrypted_content', None):
+            return
+        entry = self._stream_item(f"reasoning:{output_index}", 'reasoning', parts=[], responses_item=None)
+        entry['responses_item'] = item.model_dump(exclude_none=True)
+
+    def _responses_output_item(self, item, output_index):
         if getattr(item, 'type', None) != 'function_call':
             return []
-        index = self._stream_block_index(f"tool:{item.id or item.call_id}")
-        tool_call = self._stream_tool_calls.setdefault(index, {'id': new_tool_use_id(), 'name': '', 'arguments': ''})
+        tool_call = self._stream_item(f"tool:{output_index}", 'tool', id=new_tool_use_id(), name='', arguments='')
+        index = self._stream_block_indexes[f"tool:{output_index}"]
         previous_arguments = tool_call['arguments']
         tool_call['name'] = item.name or tool_call['name']
         if item.arguments and not tool_call['arguments']:
@@ -406,37 +436,40 @@ class _MantleTransport:
             yield {"type": "tool_use_input_delta", "index": index, "partial_json": tool_call['arguments']}
 
     def _responses_function_call_arguments_delta(self, event):
-        index = self._stream_block_index(f"tool:{event.item_id}")
-        tool_call = self._stream_tool_calls.setdefault(index, {'id': '', 'name': '', 'arguments': ''})
+        tool_call = self._stream_item(f"tool:{event.output_index}", 'tool', id=new_tool_use_id(), name='', arguments='')
+        index = self._stream_block_indexes[f"tool:{event.output_index}"]
         tool_call['arguments'] += event.delta
         if index in self._stream_started_blocks:
             yield {"type": "tool_use_input_delta", "index": index, "partial_json": event.delta}
 
     def _responses_completed(self, response):
+        for output_index, item in enumerate(response.output):
+            self._capture_responses_reasoning(item, output_index)
         self._stream_usage = response.usage
         self._stream_finish_reason = self._responses_stop_reason(response)
 
     def _responses_stop_reason(self, response):
-        if self._stream_tool_calls:
+        if any(item['kind'] == 'tool' for item in self._stream_output.values()):
             return 'tool_use'
         if getattr(response, 'status', '') == 'incomplete':
             return 'max_tokens'
         return 'end_turn'
 
+    def _stream_content_blocks(self, item):
+        if item['kind'] == 'reasoning':
+            text = ''.join(item['parts'])
+            return [MessageContent(reasoning_content=ReasoningContent(
+                reasoning_text=ReasoningText(text=text, signature='') if text else None, responses_item=item['responses_item']))]
+        if item['kind'] == 'text':
+            return [MessageContent(text=text)] if (text := ''.join(item['parts'])) else []
+        try:
+            args = json.loads(item['arguments']) if item['arguments'] else {}
+        except (json.JSONDecodeError, ValueError):
+            args = {"raw_input": item['arguments']}
+        return [MessageContent(tool_use=ToolUse(tool_use_id=item['id'], name=item['name'], input=args))]
+
     def _stream_response(self, start) -> ConverseResponse:
-        content = []
-        if self._stream_reasoning_parts:
-            content.append(MessageContent(reasoning_content=ReasoningContent(
-                reasoning_text=ReasoningText(text=''.join(self._stream_reasoning_parts), signature=''), redacted_content=None)))
-        if text := ''.join(self._stream_text_parts):
-            content.append(MessageContent(text=text))
-        for index in sorted(self._stream_tool_calls):
-            tool_call = self._stream_tool_calls[index]
-            try:
-                args = json.loads(tool_call['arguments']) if tool_call['arguments'] else {}
-            except (json.JSONDecodeError, ValueError):
-                args = {"raw_input": tool_call['arguments']}
-            content.append(MessageContent(tool_use=ToolUse(tool_use_id=tool_call['id'], name=tool_call['name'], input=args)))
+        content = [block for item in self._stream_output.values() for block in self._stream_content_blocks(item)]
         return ConverseResponse(
             output=ConverseOutput(message=Message(role='assistant', content=content)),
             stop_reason=STOP_REASON_MAP.get(self._stream_finish_reason or '', self._stream_finish_reason or 'end_turn'),
@@ -475,6 +508,10 @@ class _MantleTransport:
                 if hasattr(callback, 'on_converse_end'): callback.on_converse_end(response)
             except Exception as e: logger.warning(f"Callback error: {e}")
         return response
+
+    def with_extra_params(self, params):
+        self.extra_params = {**(self.extra_params or {}), **params}
+        return self
 
     def with_thinking(self, tokens: int | str = 1024, enabled: bool = True):
         thinking_config = ThinkingConfig(
@@ -581,6 +618,7 @@ class Mantle(_MantleTransport, Converse):
     api_key: Optional[str] = None
     base_url: Optional[str] = None
     api_mode: str = 'chat_completions'
+    extra_params: Optional[dict] = None
 
     @property
     def structured_output_class(self):
@@ -599,6 +637,7 @@ class MantleAgent(_MantleTransport, ConverseAgent):
     api_key: Optional[str] = None
     base_url: Optional[str] = None
     api_mode: str = 'chat_completions'
+    extra_params: Optional[dict] = None
 
     def prune_dangling_reasoning(self):
         pass
@@ -609,3 +648,4 @@ class StructuredMantle(_MantleTransport, StructuredConverse):
     api_key: Optional[str] = None
     base_url: Optional[str] = None
     api_mode: str = 'chat_completions'
+    extra_params: Optional[dict] = None

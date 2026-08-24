@@ -396,8 +396,11 @@ class ReasoningText(ToDictMixin, FromDictMixin):
 
 @dataclass
 class ReasoningContent(ToDictMixin, FromDictMixin):
+    _TO_DICT_SERIALIZATION_EXCLUSIONS = ['responses_item']
+    _FROM_DICT_SERIALIZATION_EXCLUSIONS = ['responses_item']
     reasoning_text: Optional[ReasoningText] = None
     redacted_content: Optional[ByteString] = None
+    responses_item: Optional[Dict[str, Any]] = None
 
 
 @dataclass
@@ -564,7 +567,8 @@ class MessageContent(ToDictMixin, FromDictMixin):
     @property
     def is_unsigned_reasoning(self):
         reasoning = self.reasoning_content
-        return bool(reasoning and reasoning.reasoning_text and not reasoning.reasoning_text.signature and not reasoning.redacted_content)
+        return bool(reasoning and (reasoning.responses_item or
+                                   reasoning.reasoning_text and not reasoning.reasoning_text.signature and not reasoning.redacted_content))
 
 
 @dataclass
