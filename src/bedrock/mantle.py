@@ -36,11 +36,27 @@ def token_usage_from_openai(usage):
                       total_tokens=getattr(usage, 'total_tokens', 0) or 0, cache_read_input_tokens=cache_read)
 
 
+def strict_schema(schema):
+    if isinstance(schema, list):
+        return [strict_schema(item) for item in schema]
+    if not isinstance(schema, dict):
+        return schema
+    result = {key: strict_schema(value) for key, value in schema.items()}
+    if result.get('type') == 'object' and 'properties' in result:
+        result['additionalProperties'] = False
+        result['required'] = list(result['properties'])
+    return result
+
+
 class _MantleTransport:
     api_key: Optional[str] = None
     base_url: Optional[str] = None
     api_mode: str = 'chat_completions'
     extra_params: Optional[dict] = None
+
+    @property
+    def strict_tool_names(self):
+        return set()
 
     @property
     def _mantle_base_url(self):
@@ -69,10 +85,15 @@ class _MantleTransport:
     def _build_tool_params(self, params):
         if not self.tool_config:
             return
-        tools = [{'type': 'function', 'function': {
-            'name': t.tool_spec.name, 'description': t.tool_spec.description,
-            'parameters': t.tool_spec.input_schema.get('json', {})
-        }} for t in self.tool_config.tools if t.tool_spec]
+        tools = []
+        for t in self.tool_config.tools:
+            if not t.tool_spec:
+                continue
+            function = {'name': t.tool_spec.name, 'description': t.tool_spec.description,
+                        'parameters': t.tool_spec.input_schema.get('json', {})}
+            if t.tool_spec.name in self.strict_tool_names:
+                function.update(parameters=strict_schema(function['parameters']), strict=True)
+            tools.append({'type': 'function', 'function': function})
         if tools:
             params['tools'] = tools
         if self.tool_config.tool_choice:
@@ -161,7 +182,7 @@ class _MantleTransport:
     def _responses_tools(self, tools):
         return [{'type': 'function', 'name': tool['function']['name'],
                  'description': tool['function'].get('description'), 'parameters': tool['function'].get('parameters') or {},
-                 'strict': False} for tool in tools]
+                 'strict': tool['function'].get('strict', False)} for tool in tools]
 
     def _responses_tool_choice(self, tool_choice):
         if isinstance(tool_choice, str):
@@ -649,3 +670,11 @@ class StructuredMantle(_MantleTransport, StructuredConverse):
     base_url: Optional[str] = None
     api_mode: str = 'chat_completions'
     extra_params: Optional[dict] = None
+
+    @property
+    def supports_forced_tool_choice(self):
+        return True
+
+    @property
+    def strict_tool_names(self):
+        return {self.output_model.__name__}

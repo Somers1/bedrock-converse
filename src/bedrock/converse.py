@@ -1263,10 +1263,6 @@ class Converse(ToDictMixin, FromDictMixin):
         assert not (skip_add_tool is True and len(
             self.tool_config.tools) == 0), "If you skip_add_tool you must add tools manually using bind_tools."
 
-        # Thinking cannot be used with forced tool choice
-        if self.thinking_enabled and force_choice:
-            force_choice = False
-
         # noinspection PyArgumentList
         return self.structured_output_class(
             model_id=self.model_id,
@@ -1311,11 +1307,14 @@ class StructuredConverse(Converse):
             raise ValueError(f'Need to specify output_model for StructuredConverse')
         if not self.skip_add_tool:
             self.add_tool(self.output_model)
-        # Thinking cannot be used with forced tool choice
-        if self.force_choice and any(m in self.model_id for m in ('claude', 'kimi')) and not self.thinking_enabled:
+        if self.force_choice and self.supports_forced_tool_choice:
             self.set_tool_choice(self.output_model.__name__)
-        if self.thinking_enabled and not self.skip_add_tool:
+        elif self.thinking_enabled and not self.skip_add_tool:
             self.add_system(f'You are in Structured Output mode. You MUST call the {self.output_model.__name__} as your final response.')
+
+    @property
+    def supports_forced_tool_choice(self):
+        return any(m in self.model_id for m in ('claude', 'kimi')) and not self.thinking_enabled
 
     def with_backup_model(self, model: Union[str, 'Converse']):
         """
