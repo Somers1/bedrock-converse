@@ -53,6 +53,7 @@ class _MantleTransport:
     base_url: Optional[str] = None
     api_mode: str = 'chat_completions'
     extra_params: Optional[dict] = None
+    session_affinity_header: Optional[str] = None
 
     @property
     def strict_tool_names(self):
@@ -144,7 +145,10 @@ class _MantleTransport:
         self._build_inference_params(params)
         self._build_thinking_params(params)
         if self.cache_key:
-            params['prompt_cache_key'] = self.cache_key
+            if self.session_affinity_header:
+                params['extra_headers'] = {self.session_affinity_header: self.cache_key}
+            else:
+                params['prompt_cache_key'] = self.cache_key
         if self.extra_params:
             params['extra_body'] = dict(self.extra_params)
         return params
@@ -177,6 +181,8 @@ class _MantleTransport:
             response_params['prompt_cache_key'] = cache_key
         if extra_body := params.get('extra_body'):
             response_params['extra_body'] = extra_body
+        if extra_headers := params.get('extra_headers'):
+            response_params['extra_headers'] = extra_headers
         return response_params
 
     def _responses_tools(self, tools):
@@ -640,6 +646,7 @@ class Mantle(_MantleTransport, Converse):
     base_url: Optional[str] = None
     api_mode: str = 'chat_completions'
     extra_params: Optional[dict] = None
+    session_affinity_header: Optional[str] = None
 
     @property
     def structured_output_class(self):
@@ -650,6 +657,8 @@ class Mantle(_MantleTransport, Converse):
         structured.api_key = self.api_key
         structured.base_url = self.base_url
         structured.api_mode = self.api_mode
+        structured.extra_params = self.extra_params
+        structured.session_affinity_header = self.session_affinity_header
         return structured
 
 
@@ -659,6 +668,7 @@ class MantleAgent(_MantleTransport, ConverseAgent):
     base_url: Optional[str] = None
     api_mode: str = 'chat_completions'
     extra_params: Optional[dict] = None
+    session_affinity_header: Optional[str] = None
 
     def prune_dangling_reasoning(self):
         pass
@@ -670,6 +680,7 @@ class StructuredMantle(_MantleTransport, StructuredConverse):
     base_url: Optional[str] = None
     api_mode: str = 'chat_completions'
     extra_params: Optional[dict] = None
+    session_affinity_header: Optional[str] = None
 
     @property
     def supports_forced_tool_choice(self):
