@@ -1997,6 +1997,8 @@ class ConverseAgent(Converse):
             return [result]
         if isinstance(result, list) and result and all(isinstance(item, ToolResultContent) for item in result):
             return result
+        if isinstance(result, (dict, list)):
+            return [ToolResultContent(text=self.extract_refs(json.dumps(result, default=str)))]
         return [ToolResultContent(text=self.extract_refs(str(result)))]
 
     def content_label(self, item):
