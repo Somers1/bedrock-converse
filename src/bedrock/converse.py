@@ -22,6 +22,7 @@ import boto3
 import json5
 import json_repair
 from botocore.config import Config
+from botocore.exceptions import ClientError
 from pydantic import BaseModel, ValidationError, Field
 
 try:
@@ -962,9 +963,13 @@ class Converse(ToDictMixin, FromDictMixin):
     _async_client: boto3.client = None
     tool_registry: ToolRegistry = field(default_factory=ToolRegistry)
     cache_key: Optional[str] = None
+    # Attempts beyond the first when the provider throttles a request (Bedrock ThrottlingException, HTTP 429
+    # via mantle). Each retry backs off exponentially (2s, 4s, ... capped at 30s); agent streams emit a
+    # rate_limited event before each wait so callers can surface the pause.
+    rate_limit_retries: int = 5
     cassette_scope: str = ''
     _TO_DICT_EXCLUSIONS = ['region_name', '_client', 'callbacks', 'aws_access_key_id', 'aws_secret_access_key',
-                           '_async_client', 'tool_registry', 'cache_key', 'cassette_scope']
+                           '_async_client', 'tool_registry', 'cache_key', 'cassette_scope', 'rate_limit_retries']
     CACHE_SUPPORTED_MODELS = ['claude', 'nova']
 
     def add_message(self):
@@ -1029,13 +1034,30 @@ class Converse(ToDictMixin, FromDictMixin):
         self.callbacks.append(callback)
         return self
 
+    def rate_limited(self, error):
+        return isinstance(error, ClientError) and error.response['Error']['Code'] in ('ThrottlingException', 'TooManyRequestsException')
+
+    def rate_limit_delay(self, attempt):
+        return min(2 ** (attempt + 1), 30)
+
+    def retry_rate_limits(self, request):
+        for attempt in range(self.rate_limit_retries + 1):
+            try:
+                return request()
+            except Exception as error:
+                if attempt == self.rate_limit_retries or not self.rate_limited(error):
+                    raise
+                delay = self.rate_limit_delay(attempt)
+                logger.warning(f"rate limited, retrying in {delay}s (attempt {attempt + 1}/{self.rate_limit_retries + 1}): {error}")
+                time.sleep(delay)
+
     def _get_response(self, messages=None):
         for callback in self.callbacks:
             try: callback.on_converse_start(self)
             except Exception as e: logger.warning(f"Callback error: {e}")
         payload = self.build_payload(messages)
         try:
-            response = ConverseResponse.from_dict(self.client.converse(**payload))
+            response = ConverseResponse.from_dict(self.retry_rate_limits(lambda: self.client.converse(**payload)))
         except Exception as error:
             for callback in self.callbacks:
                 try:
@@ -1770,14 +1792,26 @@ class ConverseAgent(Converse):
             return stop.value
 
     def streamed_response(self):
-        for attempt in range(self.stream_retries + 1):
+        corrupt = limited = 0
+        while True:
             try:
                 return (yield from self.stream())
             except IncompleteToolUseError as error:
-                if attempt == self.stream_retries:
+                corrupt += 1
+                if corrupt > self.stream_retries:
                     raise
-                logger.warning(f"corrupt tool input, re-requesting stream (attempt {attempt + 1}/{self.stream_retries + 1}): {error}")
+                logger.warning(f"corrupt tool input, re-requesting stream (attempt {corrupt}/{self.stream_retries + 1}): {error}")
                 yield {"type": "stream_reset", "reason": "corrupt_tool_input"}
+            except Exception as error:
+                if not self.rate_limited(error):
+                    raise
+                limited += 1
+                if limited > self.rate_limit_retries:
+                    raise
+                delay = self.rate_limit_delay(limited - 1)
+                logger.warning(f"rate limited, re-requesting stream in {delay}s (attempt {limited}/{self.rate_limit_retries + 1}): {error}")
+                yield {"type": "rate_limited", "attempt": limited, "retries": self.rate_limit_retries, "delay": delay}
+                time.sleep(delay)
 
     def continue_capped_turn(self):
         self.prune_dangling_reasoning()

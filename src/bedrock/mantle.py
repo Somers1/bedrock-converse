@@ -506,6 +506,24 @@ class _MantleTransport:
     def _stream_usage_obj(self):
         return token_usage_from_openai(self._stream_usage)
 
+    def rate_limited(self, error):
+        return getattr(error, 'status_code', None) == 429
+
+    def _openai_stream(self, messages):
+        if self.uses_responses_api:
+            return self.openai_client.responses.create(**self._build_responses_params(messages), stream=True)
+        params = self._build_params(messages)
+        params['stream'] = True
+        params['stream_options'] = {'include_usage': True}
+        return self.openai_client.chat.completions.create(**params)
+
+    def _consumed_response(self, messages):
+        start = time.time()
+        stream = self._openai_stream(messages)
+        if self.uses_responses_api:
+            return self._consume_responses_stream(stream, start)
+        return self._consume_stream(stream, start)
+
     def stream(self, messages=None):
         for callback in self.callbacks:
             try:
@@ -513,14 +531,10 @@ class _MantleTransport:
             except Exception as e: logger.warning(f"Callback error: {e}")
         start = time.time()
         try:
+            stream = self._openai_stream(messages)
             if self.uses_responses_api:
-                stream = self.openai_client.responses.create(**self._build_responses_params(messages), stream=True)
                 yield from self._responses_stream_events(stream)
             else:
-                params = self._build_params(messages)
-                params['stream'] = True
-                params['stream_options'] = {'include_usage': True}
-                stream = self.openai_client.chat.completions.create(**params)
                 yield from self._stream_events(stream)
             response = self._stream_response(start)
         except Exception as error:
@@ -554,17 +568,8 @@ class _MantleTransport:
         for callback in self.callbacks:
             try: callback.on_converse_start(self)
             except Exception as e: logger.warning(f"Callback error: {e}")
-        start = time.time()
         try:
-            if self.uses_responses_api:
-                stream = self.openai_client.responses.create(**self._build_responses_params(messages), stream=True)
-                response = self._consume_responses_stream(stream, start)
-            else:
-                params = self._build_params(messages)
-                params['stream'] = True
-                params['stream_options'] = {'include_usage': True}
-                stream = self.openai_client.chat.completions.create(**params)
-                response = self._consume_stream(stream, start)
+            response = self.retry_rate_limits(lambda: self._consumed_response(messages))
         except Exception as error:
             for callback in self.callbacks:
                 try:
