@@ -1305,6 +1305,8 @@ class Converse(ToDictMixin, FromDictMixin):
             performance_config=self.performance_config,
             region_name=self.region_name,
             callbacks=self.callbacks,
+            tool_registry=self.tool_registry,
+            payload_transforms=self.payload_transforms,
             _client=self._client,
             _async_client=self._async_client,
             aws_access_key_id=self.aws_access_key_id,
@@ -2017,6 +2019,8 @@ class ConverseAgent(Converse):
         return bool(self.exit_tool) and tool_name == self.exit_tool.tool_spec.name
 
     def invoke_exit_tool(self, tool_name, tool_input):
+        if self.tool_registry.tool_input_transform and (self.structured_output or tool_name == 'Finish'):
+            tool_input = self.tool_registry.tool_input_transform(tool_name, tool_input)
         if self.structured_output:
             return self.structured_output.model_validate(tool_input)
         if tool_name == 'Finish':
