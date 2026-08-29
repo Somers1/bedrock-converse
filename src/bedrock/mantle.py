@@ -55,6 +55,10 @@ class _MantleTransport:
     extra_params: Optional[dict] = None
     session_affinity_header: Optional[str] = None
 
+    def __post_init__(self):
+        getattr(super(), '__post_init__', lambda: None)()
+        self._TO_DICT_EXCLUSIONS.extend(['api_key', 'base_url', 'api_mode', 'extra_params', 'session_affinity_header'])
+
     @property
     def strict_tool_names(self):
         return set()
@@ -135,9 +139,11 @@ class _MantleTransport:
         if effort := self.reasoning_effort:
             params['reasoning_effort'] = effort
 
-    @property
-    def system_text(self):
-        return '\n'.join(s.text for s in (self.system or []) if s.text)
+    def payload_system_text(self, payload):
+        return '\n'.join(s['text'] for s in payload.get('system', []) if s.get('text'))
+
+    def payload_messages(self, payload):
+        return [Message.from_dict(m) for m in payload.get('messages', [])]
 
     def _build_shared_params(self) -> dict:
         params = {'model': self.model_id}
@@ -154,16 +160,16 @@ class _MantleTransport:
         return params
 
     def _build_params(self, messages=None) -> dict:
-        self.remove_invalid_caching(messages)
-        msgs = [{'role': 'system', 'content': self.system_text}] if self.system_text else []
-        for msg in (messages or self.messages):
+        payload = self.build_payload(messages)
+        msgs = [{'role': 'system', 'content': text}] if (text := self.payload_system_text(payload)) else []
+        for msg in self.payload_messages(payload):
             msgs.extend(self._convert_message(msg))
         return {**self._build_shared_params(), 'messages': msgs}
 
     def _build_responses_params(self, messages=None):
-        self.remove_invalid_caching(messages)
+        payload = self.build_payload(messages)
         params = self._build_shared_params()
-        response_params = {'model': params['model'], 'input': self._responses_input(messages or self.messages), 'store': False,
+        response_params = {'model': params['model'], 'input': self._responses_input(payload), 'store': False,
                            'include': ['reasoning.encrypted_content']}
         if tools := params.get('tools'):
             response_params['tools'] = self._responses_tools(tools)
@@ -197,9 +203,9 @@ class _MantleTransport:
             return {'type': 'function', 'name': tool_choice['function']['name']}
         return None
 
-    def _responses_input(self, messages):
-        items = [{'type': 'message', 'role': 'system', 'content': self.system_text}] if self.system_text else []
-        for msg in messages:
+    def _responses_input(self, payload):
+        items = [{'type': 'message', 'role': 'system', 'content': text}] if (text := self.payload_system_text(payload)) else []
+        for msg in self.payload_messages(payload):
             items.extend(self._responses_message_items(msg))
         return items
 

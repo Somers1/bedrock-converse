@@ -111,6 +111,7 @@ class InvalidFormat(ValueError):
 @dataclass
 class ToolRegistry:
     tools: Dict[str, Callable] = field(default_factory=dict)
+    tool_input_transform: Optional[Callable] = None
 
     def register(self, tool):
         # Check if it's a Tools class instance
@@ -164,6 +165,7 @@ class ToolRegistry:
         if tool_name not in self.tools:
             raise ValueError(f"Tool '{tool_name}' not found in registry")
 
+        arguments = self.tool_input_transform(tool_name, arguments) if self.tool_input_transform else arguments
         tool = self.tools[tool_name]
         # Auto-validate Pydantic models from type hints (from sortz)
         func = tool._original_function if hasattr(tool, '_original_function') else tool
@@ -968,8 +970,9 @@ class Converse(ToDictMixin, FromDictMixin):
     # rate_limited event before each wait so callers can surface the pause.
     rate_limit_retries: int = 5
     cassette_scope: str = ''
+    payload_transforms: List[Callable] = field(default_factory=list)
     _TO_DICT_EXCLUSIONS = ['region_name', '_client', 'callbacks', 'aws_access_key_id', 'aws_secret_access_key',
-                           '_async_client', 'tool_registry', 'cache_key', 'cassette_scope', 'rate_limit_retries']
+                           '_async_client', 'tool_registry', 'cache_key', 'cassette_scope', 'rate_limit_retries', 'payload_transforms']
     CACHE_SUPPORTED_MODELS = ['claude', 'nova']
 
     def add_message(self):
@@ -1081,6 +1084,8 @@ class Converse(ToDictMixin, FromDictMixin):
         payload = self.to_dict()
         if messages:
             payload['messages'] = [m.to_dict() for m in messages]
+        for transform in self.payload_transforms:
+            payload = transform(payload)
         return payload
 
     def remove_invalid_caching(self, messages):
