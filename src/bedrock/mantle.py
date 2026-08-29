@@ -54,6 +54,11 @@ class _MantleTransport:
     api_mode: str = 'chat_completions'
     extra_params: Optional[dict] = None
     session_affinity_header: Optional[str] = None
+    # httpx read timeout: fires after this many seconds WITHOUT BYTES on the socket, never mid-stream —
+    # a healthy stream resets it on every chunk. Bounds dead-air hangs the same way the boto3 client's
+    # Config(read_timeout=180) does on the Bedrock path.
+    timeout: float = 180.0
+    max_retries: int = 2
 
     def __post_init__(self):
         getattr(super(), '__post_init__', lambda: None)()
@@ -73,11 +78,9 @@ class _MantleTransport:
         return f'https://bedrock-mantle.{region}.api.aws/v1'
 
     def _get_client(self, openai_class):
-        if self.api_key:
-            return openai_class(api_key=self.api_key, base_url=self._mantle_base_url)
-        if api_key := os.environ.get('MANTLE_API_KEY'):
-            return openai_class(api_key=api_key, base_url=self._mantle_base_url)
-        return openai_class(base_url=self._mantle_base_url)
+        if api_key := self.api_key or os.environ.get('MANTLE_API_KEY'):
+            return openai_class(api_key=api_key, base_url=self._mantle_base_url, timeout=self.timeout, max_retries=self.max_retries)
+        return openai_class(base_url=self._mantle_base_url, timeout=self.timeout, max_retries=self.max_retries)
 
     @cached_property
     def openai_client(self) -> OpenAI:
