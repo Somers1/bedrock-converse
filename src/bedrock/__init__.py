@@ -19,7 +19,7 @@ from .callbacks import PrintCallback
 try:
     from .mantle import Mantle, MantleAgent, StructuredMantle
 except ImportError as exc:
-    if getattr(exc, "name", None) != "openai":
+    if getattr(exc, "name", None) not in ("openai", "httpx"):
         raise
     Mantle = None
     MantleAgent = None

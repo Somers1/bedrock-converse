@@ -65,11 +65,12 @@ class _OpenAIEmbeddingTransport:
     encoding_format: Literal["float", "base64"] = "float"
     user: Optional[str] = None
     extra_body: Dict[str, Any] = field(default_factory=dict)
-    timeout: float = 180.0
+    read_timeout: float = 180.0
     max_retries: int = 2
 
     def _get_client(self, client_class):
-        kwargs = {"timeout": self.timeout, "max_retries": self.max_retries}
+        import httpx
+        kwargs = {"timeout": httpx.Timeout(self.read_timeout, connect=5.0), "max_retries": self.max_retries}
         api_key = self.api_key or os.environ.get("OPENAI_API_KEY")
         if api_key:
             kwargs["api_key"] = api_key
