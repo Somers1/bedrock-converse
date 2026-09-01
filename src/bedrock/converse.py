@@ -965,8 +965,9 @@ class Converse(ToDictMixin, FromDictMixin):
     _async_client: boto3.client = None
     tool_registry: ToolRegistry = field(default_factory=ToolRegistry)
     cache_key: Optional[str] = None
-    # Attempts beyond the first when the provider throttles a request (Bedrock ThrottlingException, HTTP 429
-    # via mantle). Each retry backs off exponentially (2s, 4s, ... capped at 30s); agent streams emit a
+    # Attempts beyond the first when the provider throttles a request or fails transiently (Bedrock
+    # ThrottlingException / internalServerException / serviceUnavailableException, HTTP 429 via mantle).
+    # Each retry backs off exponentially (2s, 4s, ... capped at 30s); agent streams emit a
     # rate_limited event before each wait so callers can surface the pause.
     rate_limit_retries: int = 5
     cassette_scope: str = ''
@@ -1037,8 +1038,10 @@ class Converse(ToDictMixin, FromDictMixin):
         self.callbacks.append(callback)
         return self
 
-    def rate_limited(self, error):
-        return isinstance(error, ClientError) and error.response['Error']['Code'] in ('ThrottlingException', 'TooManyRequestsException')
+    RETRYABLE_ERROR_CODES = ('ThrottlingException', 'TooManyRequestsException', 'internalServerException', 'serviceUnavailableException', 'modelStreamErrorException')
+
+    def retryable(self, error):
+        return isinstance(error, ClientError) and error.response['Error']['Code'] in self.RETRYABLE_ERROR_CODES
 
     def rate_limit_delay(self, attempt):
         return min(2 ** (attempt + 1), 30)
@@ -1048,10 +1051,10 @@ class Converse(ToDictMixin, FromDictMixin):
             try:
                 return request()
             except Exception as error:
-                if attempt == self.rate_limit_retries or not self.rate_limited(error):
+                if attempt == self.rate_limit_retries or not self.retryable(error):
                     raise
                 delay = self.rate_limit_delay(attempt)
-                logger.warning(f"rate limited, retrying in {delay}s (attempt {attempt + 1}/{self.rate_limit_retries + 1}): {error}")
+                logger.warning(f"retryable error, retrying in {delay}s (attempt {attempt + 1}/{self.rate_limit_retries + 1}): {error}")
                 time.sleep(delay)
 
     def _get_response(self, messages=None):
@@ -1810,13 +1813,13 @@ class ConverseAgent(Converse):
                 logger.warning(f"corrupt tool input, re-requesting stream (attempt {corrupt}/{self.stream_retries + 1}): {error}")
                 yield {"type": "stream_reset", "reason": "corrupt_tool_input"}
             except Exception as error:
-                if not self.rate_limited(error):
+                if not self.retryable(error):
                     raise
                 limited += 1
                 if limited > self.rate_limit_retries:
                     raise
                 delay = self.rate_limit_delay(limited - 1)
-                logger.warning(f"rate limited, re-requesting stream in {delay}s (attempt {limited}/{self.rate_limit_retries + 1}): {error}")
+                logger.warning(f"retryable stream error, re-requesting stream in {delay}s (attempt {limited}/{self.rate_limit_retries + 1}): {error}")
                 yield {"type": "rate_limited", "attempt": limited, "retries": self.rate_limit_retries, "delay": delay}
                 time.sleep(delay)
 

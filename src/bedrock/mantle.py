@@ -520,7 +520,7 @@ class _MantleTransport:
     def _stream_usage_obj(self):
         return token_usage_from_openai(self._stream_usage)
 
-    def rate_limited(self, error):
+    def retryable(self, error):
         return getattr(error, 'status_code', None) == 429
 
     def _openai_stream(self, messages):
