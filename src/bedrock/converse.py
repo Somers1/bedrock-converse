@@ -108,6 +108,43 @@ class InvalidFormat(ValueError):
     pass
 
 
+class ToolArgumentError(TypeError):
+    pass
+
+
+def accepted_types(hint):
+    return [arg for arg in get_args(hint) if arg is not type(None)] if get_origin(hint) is Union else [hint]
+
+
+def accepts_string(hint):
+    return any(candidate is str or candidate is Any for candidate in accepted_types(hint))
+
+
+def parsed_json(value):
+    try:
+        return json.loads(value)
+    except ValueError:
+        return value
+
+
+def normalized_argument(hint, value):
+    if hint and isinstance(value, str) and not accepts_string(hint):
+        value = parsed_json(value)
+    if hint and isinstance(value, dict) and hasattr(hint, 'model_validate'):
+        return hint.model_validate(value)
+    if hint and get_origin(hint) is list and value is not None and not isinstance(value, (list, tuple)):
+        return [value]
+    return value
+
+
+def ensure_signature(tool_name, signature, arguments):
+    try:
+        signature.bind(**arguments)
+    except TypeError as exc:
+        parameters = ', '.join(str(param) for param in signature.parameters.values())
+        raise ToolArgumentError(f"{tool_name} {exc} — this tool takes ({parameters}). Call it again with corrected arguments.") from exc
+
+
 @dataclass
 class ToolRegistry:
     tools: Dict[str, Callable] = field(default_factory=dict)
@@ -167,29 +204,20 @@ class ToolRegistry:
 
         arguments = self.tool_input_transform(tool_name, arguments) if self.tool_input_transform else arguments
         tool = self.tools[tool_name]
-        # Auto-validate Pydantic models from type hints (from sortz)
         func = tool._original_function if hasattr(tool, '_original_function') else tool
         try:
             type_hints = get_type_hints(func)
         except Exception:
             type_hints = {}
-        # Get known parameter names from the function signature
-        import inspect
         try:
-            known_params = set(inspect.signature(func).parameters.keys())
+            signature = inspect.signature(func)
         except (ValueError, TypeError):
-            known_params = set(type_hints.keys())
-        # Convert camelCase keys to snake_case only when unrecognised and snake version matches
+            signature = None
+        known_params = set(signature.parameters) if signature else set(type_hints.keys())
         arguments = self._fix_camel_keys(arguments, known_params)
-        validated_args = {}
-        for key, value in arguments.items():
-            hint = type_hints.get(key)
-            if hint and isinstance(value, dict) and hasattr(hint, 'model_validate'):
-                validated_args[key] = hint.model_validate(value)
-            elif hint and get_origin(hint) is list and value is not None and not isinstance(value, (list, tuple)):
-                validated_args[key] = [value]
-            else:
-                validated_args[key] = value
+        validated_args = {key: normalized_argument(type_hints.get(key), value) for key, value in arguments.items()}
+        if signature:
+            ensure_signature(tool_name, signature, validated_args)
 
         if hasattr(tool, '_execute'):
             return tool._execute(**validated_args)
