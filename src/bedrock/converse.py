@@ -1896,7 +1896,7 @@ class ConverseAgent(Converse):
                     yield {"type": "done", "result": None, "truncated": True}
                     return self._fire_run_end(None)
                 last_content_text = self.messages[-1].content[-1].text
-                logger.error(last_content_text)
+                logger.warning(f"{self.model_id} returned an empty response (stop_reason={response.stop_reason})")
                 yield {"type": "done", "result": last_content_text}
                 return self._fire_run_end(last_content_text)
             has_tools = any(c.tool_use for c in response.output.message.content)
