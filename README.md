@@ -327,6 +327,14 @@ agent.on_text(lambda text: text if "done" in text else None)
 agent.on_tool_result(lambda name, content: offload(content) if too_big(content) else None)
 ```
 
+### Tool errors
+
+A tool that raises is answered with an error tool result carrying the exception text, and the loop continues so the model can correct itself. Wrong argument shapes and unknown tool names are always treated as corrections for the model (`ToolArgumentError`) and logged as warnings. Declare the exception types your own tools raise on purpose — a refused pointer, a validation message — so they are logged the same way instead of as tool failures with a traceback:
+
+```python
+agent.expect_tool_errors(ValidationError, WarrenError)
+```
+
 ### Parallel tool execution
 
 When the model emits several tool calls in one turn, run them concurrently instead of one-by-one. The exit tool and model-switch tools stay serial, so the ref registry and history are never touched off-thread:

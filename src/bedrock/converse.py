@@ -112,6 +112,10 @@ class ToolArgumentError(TypeError):
     pass
 
 
+class UnknownTool(ToolArgumentError, ValueError):
+    pass
+
+
 def accepted_types(hint):
     return [arg for arg in get_args(hint) if arg is not type(None)] if get_origin(hint) is Union else [hint]
 
@@ -200,7 +204,7 @@ class ToolRegistry:
     def execute(self, tool_name: str, arguments: dict) -> Any:
         tool_name = self._resolve_tool_name(tool_name)
         if tool_name not in self.tools:
-            raise ValueError(f"Tool '{tool_name}' not found in registry")
+            raise UnknownTool(f"Tool '{tool_name}' is not available. Available tools: {', '.join(self.tools)}. Call one of those instead.")
 
         arguments = self.tool_input_transform(tool_name, arguments) if self.tool_input_transform else arguments
         tool = self.tools[tool_name]
@@ -1648,9 +1652,10 @@ class ConverseAgent(Converse):
     # Runs in-loop before the result is sent or persisted, so the substituted content is what gets cached.
     tool_result_hook: Optional[Callable] = None
     interrupt_exceptions: tuple[type[BaseException], ...] = field(default_factory=tuple)
+    expected_tool_errors: tuple[type[BaseException], ...] = field(default_factory=tuple)
 
     def __post_init__(self):
-        super()._TO_DICT_EXCLUSIONS.extend(['max_iterations', 'exit_tool', 'auto_exit_tool', 'structured_output', 'debug', '_list_wrapped', '_on_text', 'suppress_text_during_loop', 'ref_registry', 'prompt_caching', 'cache_ttl', 'parallel_tools', 'tool_thread_hook', 'stream_retries', 'max_continuations', 'tool_result_hook', 'interrupt_exceptions'])
+        super()._TO_DICT_EXCLUSIONS.extend(['max_iterations', 'exit_tool', 'auto_exit_tool', 'structured_output', 'debug', '_list_wrapped', '_on_text', 'suppress_text_during_loop', 'ref_registry', 'prompt_caching', 'cache_ttl', 'parallel_tools', 'tool_thread_hook', 'stream_retries', 'max_continuations', 'tool_result_hook', 'interrupt_exceptions', 'expected_tool_errors'])
 
     CONTINUATION_PROMPT = "Your previous message was cut off because it reached the output token limit. Continue exactly where you left off — do not repeat anything you already wrote, and if you were in the middle of a tool call, re-issue it in full."
 
@@ -1688,6 +1693,10 @@ class ConverseAgent(Converse):
 
     def interrupt_on(self, *exceptions):
         self.interrupt_exceptions = tuple(exceptions)
+        return self
+
+    def expect_tool_errors(self, *exceptions):
+        self.expected_tool_errors = tuple(exceptions)
         return self
 
     def bind_exit_tool(self, tool):
@@ -2026,9 +2035,14 @@ class ConverseAgent(Converse):
             summary = '\n'.join(item.text if item.text is not None else self.content_label(item) for item in content)
             tool_result = ToolResult(tool_use_id=tool_use.tool_use_id, content=content, status="success")
             return tool_result, {"type": "tool_result", "tool_use_id": tool_use.tool_use_id, "name": tool_use.name, "result": summary, "status": "success"}
-        logger.error(f'Failed to call tool {exc}', exc_info=exc)
+        self.log_tool_failure(tool_use, exc)
         tool_result = ToolResult(tool_use_id=tool_use.tool_use_id, content=[ToolResultContent(text=str(exc))], status="error")
         return tool_result, {"type": "tool_result", "tool_use_id": tool_use.tool_use_id, "name": tool_use.name, "result": str(exc), "status": "error"}
+
+    def log_tool_failure(self, tool_use, exc):
+        if isinstance(exc, (ToolArgumentError, *self.expected_tool_errors)):
+            return logger.warning(f'{tool_use.name} rejected the call: {exc}')
+        logger.error(f'Failed to call tool {exc}', exc_info=exc)
 
     def as_tool_content(self, result):
         if isinstance(result, ToolResultContent):
