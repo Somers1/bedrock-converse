@@ -314,7 +314,7 @@ class ToDictMixin:
         elif isinstance(value, list):
             return [self._to_convert_value(item) for item in value]
         elif isinstance(value, dict):
-            return {_to_camel_case(k): self._to_convert_value(v) for k, v in value.items()}
+            return {k: self._to_convert_value(v) for k, v in value.items()}
         else:
             return value
 

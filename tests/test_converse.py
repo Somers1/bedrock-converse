@@ -236,6 +236,34 @@ class TestSerialization(unittest.TestCase):
         self.assertEqual(tu.tool_use_id, "abc")
         self.assertEqual(tu.input, {"x": 1})
 
+    def test_tool_use_preserves_nested_keys(self):
+        arguments = {"until": {"and": [{"live_sha": {"ne": "9ce6d969"}}, {"liveSha": {"eq": "other"}}]}}
+        message = Message(role="assistant", content=[MessageContent(tool_use=ToolUse("watch", "watch", arguments))])
+        serialized = message.to_dict()
+        self.assertEqual(serialized["content"][0], {"toolUse": {"toolUseId": "watch", "name": "watch", "input": arguments}})
+        self.assertEqual(Message.from_dict(serialized).to_dict(), serialized)
+        self.assertEqual(message.content[0].tool_use.input, arguments)
+
+    def test_tool_result_preserves_distinct_keys(self):
+        payload = {"live_sha": "9ce6d969", "liveSha": "other", "record_rows": [{"pending_sha": "next"}]}
+        result = ToolResult("watch", [ToolResultContent(json=payload)], status="success")
+        serialized = result.to_dict()
+        self.assertEqual(serialized["toolUseId"], "watch")
+        self.assertEqual(serialized["content"], [{"json": payload}])
+        self.assertEqual(ToolResult.from_dict(serialized).to_dict(), serialized)
+
+    def test_dictionary_values_serialize_protocol_objects(self):
+        content = ToolResultContent(json={"usage_data": [ConverseInferenceConfig(max_tokens=10)]})
+        self.assertEqual(content.to_dict(), {"json": {"usage_data": [{"maxTokens": 10}]}})
+
+    def test_request_history_preserves_tool_arguments(self):
+        arguments = {"until": {"live_sha": {"ne": "9ce6d969"}}, "timeout_minutes": 10}
+        message = Message(role="assistant", content=[MessageContent(tool_use=ToolUse("watch", "watch", arguments))])
+        converse = Converse(model_id="claude-sonnet-4", inference_config=ConverseInferenceConfig(max_tokens=10))
+        payload = converse.build_payload([message])
+        self.assertEqual(payload["inferenceConfig"], {"maxTokens": 10})
+        self.assertEqual(payload["messages"][0]["content"][0]["toolUse"]["input"], arguments)
+
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  3. Converse class
