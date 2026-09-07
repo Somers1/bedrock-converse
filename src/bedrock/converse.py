@@ -171,7 +171,7 @@ class ToolRegistry:
         else:
             raise ValueError(f"Object {tool} is not a valid tool (not decorated with @tool or not a Tools instance)")
 
-    def _resolve_tool_name(self, tool_name: str) -> str:
+    def canonical_name(self, tool_name: str) -> str:
         if tool_name in self.tools:
             return tool_name
         matches = [k for k in self.tools if k.endswith(f"_{tool_name}")]
@@ -202,7 +202,7 @@ class ToolRegistry:
         return fixed
 
     def execute(self, tool_name: str, arguments: dict) -> Any:
-        tool_name = self._resolve_tool_name(tool_name)
+        tool_name = self.canonical_name(tool_name)
         if tool_name not in self.tools:
             raise UnknownTool(f"Tool '{tool_name}' is not available. Available tools: {', '.join(self.tools)}. Call one of those instead.")
 
@@ -232,7 +232,7 @@ class ToolRegistry:
         return self.tools.get(tool_name)
 
     def set_model_switch(self, tool_name: str, switch):
-        self.tools[self._resolve_tool_name(tool_name)]._model_switch = switch
+        self.tools[self.canonical_name(tool_name)]._model_switch = switch
 
     def list_tools(self) -> List[str]:
         return list(self.tools.keys())
@@ -1911,7 +1911,7 @@ class ConverseAgent(Converse):
             has_tools = any(c.tool_use for c in response.output.message.content)
             if self.suppress_text_during_loop and has_tools:
                 response.output.message.content = [c for c in response.output.message.content if not c.text or c.tool_use]
-            self.messages.append(response.output.message)
+            self.messages.append(self.canonicalise_tool_names(response.output.message))
             tool_results, exit_tool_results = yield from self.execute_tool_uses(response.output.message.content)
             if not tool_results:
                 if capped and continuations < self.max_continuations:
@@ -1948,6 +1948,12 @@ class ConverseAgent(Converse):
         result = f"Agent reached maximum iterations ({max_iterations}) without calling exit tool"
         yield {"type": "done", "result": result, "max_iterations_reached": True}
         return self._fire_run_end(result)
+
+    def canonicalise_tool_names(self, message):
+        for content in message.content:
+            if content.tool_use:
+                content.tool_use.name = self.tool_registry.canonical_name(content.tool_use.name)
+        return message
 
     def execute_tool_uses(self, contents):
         tool_uses = [content.tool_use for content in contents if content.tool_use]
