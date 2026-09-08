@@ -342,6 +342,10 @@ class Image(ToDictMixin, FromDictMixin):
         if self.format not in valid_formats:
             raise InvalidFormat(f"Invalid format: {self.format}. Must be one of: {', '.join(valid_formats)}")
 
+    @property
+    def mime_type(self):
+        return f'image/{self.format}'
+
 
 @dataclass
 class Document(ToDictMixin, FromDictMixin):
@@ -366,12 +370,20 @@ class Document(ToDictMixin, FromDictMixin):
 class VideoSource(ToDictMixin, FromDictMixin):
     bytes: Optional[ByteString] = None
     s3_location: Optional[S3Location] = None
+    url: Optional[str] = None
+
+
+VIDEO_MIME_SUBTYPES = {'mov': 'quicktime', 'mkv': 'x-matroska', 'three_gp': '3gpp', 'mpg': 'mpeg', 'flv': 'x-flv', 'wmv': 'x-ms-wmv'}
 
 
 @dataclass
 class Video(ToDictMixin, FromDictMixin):
     format: Literal["mkv", "mov", "mp4", "webm", "flv", "mpeg", "mpg", "wmv", "three_gp"]
     source: VideoSource
+
+    @property
+    def mime_type(self):
+        return f'video/{VIDEO_MIME_SUBTYPES.get(self.format, self.format)}'
 
 
 @dataclass
@@ -666,8 +678,9 @@ class Message(ToDictMixin, FromDictMixin):
         self.content.append(MessageContent(document=document))
         return self
 
-    def add_video(self, video):
-        raise NotImplementedError
+    def add_video(self, source, video_format, url=None):
+        self.content.append(MessageContent(video=Video(format=video_format, source=VideoSource(bytes=source, url=url))))
+        return self
 
     def reduce_tokens(self):
         for content in self.content:
@@ -1093,7 +1106,7 @@ class Converse(ToDictMixin, FromDictMixin):
         for callback in self.callbacks:
             try: callback.on_converse_start(self)
             except Exception as e: logger.warning(f"Callback error: {e}")
-        payload = self.build_payload(messages)
+        payload = self.bedrock_payload(messages)
         try:
             response = ConverseResponse.from_dict(self.retry_rate_limits(lambda: self.client.converse(**payload)))
         except Exception as error:
@@ -1123,6 +1136,15 @@ class Converse(ToDictMixin, FromDictMixin):
             payload = transform(payload)
         return payload
 
+    def bedrock_payload(self, messages):
+        payload = self.build_payload(messages)
+        for message in payload.get('messages', []):
+            for block in message.get('content', []):
+                for content in [block] + (block.get('toolResult') or {}).get('content', []):
+                    if 'video' in content:
+                        content['video']['source'].pop('url', None)
+        return payload
+
     def remove_invalid_caching(self, messages):
         if not self.caching_supported:
             logger.warning(f'Removing caching since {self.model_id} does not support it.')
@@ -1141,7 +1163,7 @@ class Converse(ToDictMixin, FromDictMixin):
                 if hasattr(callback, 'on_converse_start'): callback.on_converse_start(self)
             except Exception as e: logger.warning(f"Callback error: {e}")
         loop = asyncio.get_event_loop()
-        payload = self.build_payload(messages)
+        payload = self.bedrock_payload(messages)
         try:
             response_dict = await loop.run_in_executor(None, lambda: self.client.converse(**payload))
         except Exception as error:
@@ -1176,7 +1198,7 @@ class Converse(ToDictMixin, FromDictMixin):
             try:
                 if hasattr(callback, 'on_converse_start'): callback.on_converse_start(self)
             except Exception as e: logger.warning(f"Callback error: {e}")
-        payload = self.build_payload(messages)
+        payload = self.bedrock_payload(messages)
         try:
             raw = self.client.converse_stream(**payload)
             builder = StreamResponseBuilder()

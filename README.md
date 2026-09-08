@@ -66,12 +66,15 @@ message.add_image(image_bytes, "jpeg")
 # Documents (PDF, Word, CSV, etc.)
 message.add_document(pdf_bytes, "quarterly-report")  # Name auto-cleaned
 
-# Video
-from bedrock import Video, VideoSource, S3Location
-video = Video(format="mp4", source=VideoSource(
-    s3_location=S3Location(uri="s3://bucket/video.mp4", bucket_owner="123456")
-))
-message.add_video(video)
+# Video. Bedrock sends the bytes natively. OpenAI-compatible providers get a video_url part: the fetchable
+# url when you pass one, otherwise a base64 data URI (Fireworks serverless rejects data URIs for video, so pass a url there).
+message.add_video(video_bytes, "mp4")
+message.add_video(video_bytes, "mp4", url="https://media.example.com/clip.mp4")
+
+# Video from S3 (Bedrock only)
+from bedrock import MessageContent, Video, VideoSource, S3Location
+message.content.append(MessageContent(video=Video(format="mp4", source=VideoSource(
+    s3_location=S3Location(uri="s3://bucket/video.mp4", bucket_owner="123456")))))
 
 # Timestamp
 from zoneinfo import ZoneInfo

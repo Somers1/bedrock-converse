@@ -1,7 +1,7 @@
 from .converse import (
     Converse, ConverseAgent, StructuredConverse, StructuredMaverick,
     Message, Prompt, ConverseResponse, ConverseInferenceConfig,
-    ThinkingConfig, SystemContent, MessageContent, Document, Image, Video,
+    ThinkingConfig, SystemContent, MessageContent, Document, Image, Video, VideoSource, S3Location,
     ToolUse, ToolResult, ToolResultContent, Tool, ToolSpec, ToolChoice,
     ConverseToolConfig, AdditionalModelRequestFields, ConversePerformanceConfig,
     Finish, structured_model_factory, TokenUsage

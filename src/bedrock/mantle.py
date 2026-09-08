@@ -243,13 +243,15 @@ class _MantleTransport:
         if c.text:
             return [{'type': 'input_text', 'text': c.text}]
         if c.image:
-            return [{'type': 'input_image', 'image_url': self._data_url(c.image.format, c.image.source.bytes), 'detail': 'auto'}]
+            return [{'type': 'input_image', 'image_url': self._data_url(c.image), 'detail': 'auto'}]
         if c.document:
             return [{'type': 'input_text', 'text': self._document_text(c.document)}]
+        if c.video:
+            raise ValueError('The Responses API does not accept video input; use the chat_completions api_mode')
         return []
 
-    def _data_url(self, media_format, raw):
-        return f'data:image/{media_format};base64,{base64.b64encode(raw).decode()}'
+    def _data_url(self, media):
+        return f'data:{media.mime_type};base64,{base64.b64encode(media.source.bytes).decode()}'
 
     def _document_text(self, document):
         return f'[Document: {document.name}.{document.format}]\n{base64.b64encode(document.source.bytes).decode()}'
@@ -263,6 +265,7 @@ class _MantleTransport:
             if trc.text: parts.append(trc.text)
             elif trc.json is not None: parts.append(json.dumps(trc.json))
             elif trc.image: parts.append('[image provided in the following message]')
+            elif trc.video: parts.append('[video provided in the following message]')
             elif trc.document: parts.append(f'[document: {trc.document.name}.{trc.document.format}]')
         return '\n'.join(parts)
 
@@ -291,7 +294,10 @@ class _MantleTransport:
             if c.text: parts.append({'type': 'text', 'text': c.text})
             elif c.image:
                 has_multimodal = True
-                parts.append({'type': 'image_url', 'image_url': {'url': self._data_url(c.image.format, c.image.source.bytes)}})
+                parts.append({'type': 'image_url', 'image_url': {'url': self._data_url(c.image)}})
+            elif c.video:
+                has_multimodal = True
+                parts.append({'type': 'video_url', 'video_url': {'url': c.video.source.url or self._data_url(c.video)}})
             elif c.document:
                 parts.append({'type': 'text', 'text': self._document_text(c.document)})
         if not parts:
@@ -301,8 +307,8 @@ class _MantleTransport:
         return [{'role': 'user', 'content': parts[0].get('text', '')}]
 
     def _convert_message(self, msg):
-        images = [MessageContent(image=item.image) for c in msg.content if c.tool_result for item in c.tool_result.content if item.image]
-        tool_results = self._convert_tool_results(msg.content) + (self._convert_user(images) if images else [])
+        media = [MessageContent(image=item.image, video=item.video) for c in msg.content if c.tool_result for item in c.tool_result.content if item.image or item.video]
+        tool_results = self._convert_tool_results(msg.content) + (self._convert_user(media) if media else [])
         other = [c for c in msg.content if not c.tool_result and not c.cache_point]
         if not other:
             return tool_results
