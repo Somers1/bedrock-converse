@@ -69,8 +69,8 @@ class _OpenAIEmbeddingTransport:
     max_retries: int = 2
 
     def _get_client(self, client_class):
-        import httpx
-        kwargs = {"timeout": httpx.Timeout(self.read_timeout, connect=5.0), "max_retries": self.max_retries}
+        from openai import Timeout
+        kwargs = {"timeout": Timeout(self.read_timeout, connect=5.0), "max_retries": self.max_retries}
         api_key = self.api_key or os.environ.get("OPENAI_API_KEY")
         if api_key:
             kwargs["api_key"] = api_key

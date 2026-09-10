@@ -8,8 +8,7 @@ from dataclasses import dataclass
 from functools import cached_property
 from typing import Optional
 
-import httpx
-from openai import OpenAI, AsyncOpenAI
+from openai import OpenAI, AsyncOpenAI, Timeout
 
 from .converse import (Converse, ConverseAgent, StructuredConverse, ConverseResponse, ConverseOutput,
                        Message, MessageContent, ToolUse, TokenUsage, ConverseMetrics,
@@ -63,7 +62,7 @@ class _MantleTransport:
 
     @property
     def client_timeout(self):
-        return httpx.Timeout(self.read_timeout, connect=5.0)
+        return Timeout(self.read_timeout, connect=5.0)
 
     def __post_init__(self):
         getattr(super(), '__post_init__', lambda: None)()
