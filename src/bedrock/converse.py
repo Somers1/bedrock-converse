@@ -850,6 +850,21 @@ class ConverseResponse(FromDictMixin):
     def cost(self):
         return ConverseCost(model_id=self.model_id, usage=self.usage)
 
+    @property
+    def is_empty(self):
+        return not self.output.message.content and self.stop_reason != "max_tokens"
+
+    def require_content(self):
+        if self.is_empty:
+            raise EmptyResponseError(self.stop_reason)
+        return self
+
+
+class EmptyResponseError(RuntimeError):
+    def __init__(self, stop_reason):
+        self.stop_reason = stop_reason
+        super().__init__(f"The model returned an empty reply (stop_reason={stop_reason})")
+
 
 class BedrockStreamError(RuntimeError):
     def __init__(self, event_type, event):
@@ -1086,7 +1101,7 @@ class Converse(ToDictMixin, FromDictMixin):
     RETRYABLE_ERROR_CODES = ('ThrottlingException', 'TooManyRequestsException', 'internalServerException', 'serviceUnavailableException', 'modelStreamErrorException')
 
     def retryable(self, error):
-        return isinstance(error, ClientError) and error.response['Error']['Code'] in self.RETRYABLE_ERROR_CODES
+        return isinstance(error, EmptyResponseError) or isinstance(error, ClientError) and error.response['Error']['Code'] in self.RETRYABLE_ERROR_CODES
 
     def rate_limit_delay(self, attempt):
         return min(2 ** (attempt + 1), 30)
@@ -1108,7 +1123,7 @@ class Converse(ToDictMixin, FromDictMixin):
             except Exception as e: logger.warning(f"Callback error: {e}")
         payload = self.bedrock_payload(messages)
         try:
-            response = ConverseResponse.from_dict(self.retry_rate_limits(lambda: self.client.converse(**payload)))
+            response = self.retry_rate_limits(lambda: ConverseResponse.from_dict(self.client.converse(**payload)).require_content())
         except Exception as error:
             for callback in self.callbacks:
                 try:
@@ -1205,7 +1220,7 @@ class Converse(ToDictMixin, FromDictMixin):
             for raw_event in raw['stream']:
                 for normalized in builder.absorb(raw_event):
                     yield normalized
-            response = builder.build()
+            response = builder.build().require_content()
         except Exception as error:
             for callback in self.callbacks:
                 try:
@@ -1918,18 +1933,13 @@ class ConverseAgent(Converse):
                 return self._fire_run_end(result)
             capped = response.stop_reason == "max_tokens"
             if not response.output.message.content:
-                if capped and continuations < self.max_continuations:
+                if continuations < self.max_continuations:
                     continuations += 1
                     yield {"type": "max_tokens_continue", "continuation": continuations}
                     continue
-                if capped:
-                    yield {"type": "continuation_required"}
-                    yield {"type": "done", "result": None, "truncated": True}
-                    return self._fire_run_end(None)
-                last_content_text = self.messages[-1].content[-1].text
-                logger.warning(f"{self.model_id} returned an empty response (stop_reason={response.stop_reason})")
-                yield {"type": "done", "result": last_content_text}
-                return self._fire_run_end(last_content_text)
+                yield {"type": "continuation_required"}
+                yield {"type": "done", "result": None, "truncated": True}
+                return self._fire_run_end(None)
             has_tools = any(c.tool_use for c in response.output.message.content)
             if self.suppress_text_during_loop and has_tools:
                 response.output.message.content = [c for c in response.output.message.content if not c.text or c.tool_use]

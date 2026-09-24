@@ -526,7 +526,7 @@ class _MantleTransport:
         return token_usage_from_openai(self._stream_usage)
 
     def retryable(self, error):
-        return getattr(error, 'status_code', None) == 429
+        return super().retryable(error) or getattr(error, 'status_code', None) == 429
 
     def _openai_stream(self, messages):
         if self.uses_responses_api:
@@ -555,7 +555,7 @@ class _MantleTransport:
                 yield from self._responses_stream_events(stream)
             else:
                 yield from self._stream_events(stream)
-            response = self._stream_response(start)
+            response = self._stream_response(start).require_content()
         except Exception as error:
             for callback in self.callbacks:
                 try:
@@ -588,7 +588,7 @@ class _MantleTransport:
             try: callback.on_converse_start(self)
             except Exception as e: logger.warning(f"Callback error: {e}")
         try:
-            response = self.retry_rate_limits(lambda: self._consumed_response(messages))
+            response = self.retry_rate_limits(lambda: self._consumed_response(messages).require_content())
         except Exception as error:
             for callback in self.callbacks:
                 try:
