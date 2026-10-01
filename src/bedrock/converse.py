@@ -1366,7 +1366,7 @@ class Converse(ToDictMixin, FromDictMixin):
         return self.structured_output_class(
             model_id=self.model_id,
             messages=self.messages.copy(),
-            system=self.system,
+            system=self.system.copy(),
             inference_config=self.inference_config,
             tool_config=self.tool_config,
             guardrail_config=self.guardrail_config,
@@ -1410,7 +1410,7 @@ class StructuredConverse(Converse):
             self.add_tool(self.output_model)
         if self.force_choice and self.supports_forced_tool_choice:
             self.set_tool_choice(self.output_model.__name__)
-        elif self.thinking_enabled and not self.skip_add_tool:
+        elif not self.skip_add_tool:
             self.add_system(f'You are in Structured Output mode. You MUST call the {self.output_model.__name__} as your final response.')
 
     @property
