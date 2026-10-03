@@ -1841,7 +1841,7 @@ class ConverseAgent(Converse):
         if converse.performance_config:
             self.performance_config = converse.performance_config
 
-    REF_PATTERN = re.compile(r'\[ref:([\w-]+)=([^\]]+)\]')
+    REF_PATTERN = re.compile(r' ?\[ref:([\w-]+)=([^\]]+)\]')
 
     def resolve_refs(self, tool_input):
         resolved = {}
@@ -1860,7 +1860,6 @@ class ConverseAgent(Converse):
 
     def extract_refs(self, result_str):
         clean = self.REF_PATTERN.sub('', result_str).rstrip()
-        clean = re.sub(r' {2,}', ' ', clean)
         for match in self.REF_PATTERN.finditer(result_str):
             self.ref_registry[match.group(1)] = match.group(2)
         return clean
