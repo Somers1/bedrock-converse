@@ -1091,6 +1091,10 @@ class Converse(ToDictMixin, FromDictMixin):
         response = await self._aget_response(self._format_invoke_message(message))
         return self.format_response(response)
 
+    def normalized(self, arguments):
+        hints = get_type_hints(self.output_model)
+        return {key: normalized_argument(hints.get(key), value) for key, value in arguments.items()}
+
     def format_response(self, response):
         return response
 
@@ -1551,7 +1555,7 @@ class StructuredConverse(Converse):
         response_texts = []
         for content in response.output.message.content:
             if content.tool_use and content.tool_use.name == self.output_model.__name__:
-                response_objects.append(self.output_model.model_validate(content.tool_use.input))
+                response_objects.append(self.output_model.model_validate(self.normalized(content.tool_use.input)))
             if content.text:
                 response_texts.append(content.text)
         if not response_objects:
