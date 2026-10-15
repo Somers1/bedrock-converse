@@ -24,6 +24,7 @@ import json_repair
 from botocore.config import Config
 from botocore.exceptions import ClientError
 from pydantic import BaseModel, ValidationError, Field
+from pydantic.json_schema import GenerateJsonSchema
 
 try:
     from PIL import Image as PILImage
@@ -595,6 +596,38 @@ class AdditionalModelRequestFields(ToDictMixin):
     output_config: Optional[OutputConfig] = None
 
 
+class ClosedJsonSchema(GenerateJsonSchema):
+    def model_schema(self, schema):
+        return {**super().model_schema(schema), 'additionalProperties': False}
+
+
+@dataclass
+class JsonSchemaDefinition(ToDictMixin):
+    schema: str
+    name: str
+
+
+@dataclass
+class OutputFormatStructure(ToDictMixin):
+    json_schema: JsonSchemaDefinition
+
+
+@dataclass
+class OutputFormat(ToDictMixin):
+    structure: OutputFormatStructure
+    type: str = "json_schema"
+
+
+@dataclass
+class ConverseOutputConfig(ToDictMixin):
+    text_format: OutputFormat
+
+    @classmethod
+    def from_pydantic(cls, pydantic_model):
+        schema = json.dumps(pydantic_model.model_json_schema(schema_generator=ClosedJsonSchema))
+        return cls(text_format=OutputFormat(structure=OutputFormatStructure(json_schema=JsonSchemaDefinition(schema=schema, name=pydantic_model.__name__))))
+
+
 @dataclass
 class MessageContent(ToDictMixin, FromDictMixin):
     text: Optional[str] = None
@@ -1017,6 +1050,7 @@ class Converse(ToDictMixin, FromDictMixin):
     additional_model_response_field_paths: Optional[List[str]] = None
     request_metadata: Optional[Dict[str, str]] = None
     performance_config: Optional[ConversePerformanceConfig] = None
+    output_config: Optional[ConverseOutputConfig] = None
     _client: boto3.client = None
     region_name: str = None
     callbacks: List[BaseCallbackHandler] = field(default_factory=list)
@@ -1419,7 +1453,7 @@ class StructuredConverse(Converse):
 
     @property
     def supports_forced_tool_choice(self):
-        return any(m in self.model_id for m in ('claude', 'kimi')) and not self.thinking_enabled
+        return 'kimi' in self.model_id and not self.thinking_enabled
 
     def with_backup_model(self, model: Union[str, 'Converse']):
         """
@@ -1626,8 +1660,19 @@ CRITICAL RULES:
                 return None
 
 
+@dataclass
+class StructuredClaude(StructuredConverse):
+    def __post_init__(self):
+        super()._TO_DICT_EXCLUSIONS.extend(['output_model', 'force_choice', 'skip_add_tool', 'first_tool_only', 'backup_model'])
+        self.output_config = ConverseOutputConfig.from_pydantic(self.output_model)
+
+    def format_response(self, response):
+        return self.output_model.model_validate_json(''.join(content.text for content in response.output.message.content if content.text))
+
+
 CUSTOM_STRUCTURED_MODELS = {
-    'llama4-maverick': StructuredMaverick
+    'llama4-maverick': StructuredMaverick,
+    'claude': StructuredClaude,
 }
 
 
