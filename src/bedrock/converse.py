@@ -23,7 +23,7 @@ import json5
 import json_repair
 from botocore.config import Config
 from botocore.exceptions import ClientError
-from pydantic import BaseModel, ValidationError, Field
+from pydantic import BaseModel, ValidationError, Field, create_model
 from pydantic.json_schema import GenerateJsonSchema
 
 try:
@@ -597,8 +597,25 @@ class AdditionalModelRequestFields(ToDictMixin):
 
 
 class ClosedJsonSchema(GenerateJsonSchema):
+    UNSUPPORTED = ('minimum', 'maximum', 'exclusiveMinimum', 'exclusiveMaximum', 'multipleOf', 'maxItems', 'uniqueItems')
+
     def model_schema(self, schema):
         return {**super().model_schema(schema), 'additionalProperties': False}
+
+    def int_schema(self, schema):
+        return self.supported(super().int_schema(schema))
+
+    def float_schema(self, schema):
+        return self.supported(super().float_schema(schema))
+
+    def list_schema(self, schema):
+        return self.supported(super().list_schema(schema))
+
+    def set_schema(self, schema):
+        return self.supported(super().set_schema(schema))
+
+    def supported(self, schema):
+        return {key: value for key, value in schema.items() if key not in self.UNSUPPORTED and not (key == 'minItems' and value > 1)}
 
 
 @dataclass
@@ -1356,13 +1373,13 @@ class Converse(ToDictMixin, FromDictMixin):
         return self
 
     @property
+    def thinking_type(self) -> Optional[str]:
+        return self.additional_model_request_fields and self.additional_model_request_fields.thinking and self.additional_model_request_fields.thinking.type
+
+    @property
     def thinking_enabled(self) -> bool:
         """Check if extended thinking is currently enabled."""
-        return (
-            self.additional_model_request_fields is not None
-            and self.additional_model_request_fields.thinking is not None
-            and self.additional_model_request_fields.thinking.type in ("enabled", "adaptive")
-        )
+        return self.thinking_type in ("enabled", "adaptive")
 
     def with_thinking(self, tokens: int | str = 1024, enabled: bool = True):
         thinking_config = ThinkingConfig(
@@ -1453,7 +1470,7 @@ class StructuredConverse(Converse):
 
     @property
     def supports_forced_tool_choice(self):
-        return 'kimi' in self.model_id and not self.thinking_enabled
+        return any(m in self.model_id for m in ('claude', 'kimi')) and self.thinking_type != 'enabled'
 
     def with_backup_model(self, model: Union[str, 'Converse']):
         """
@@ -1664,15 +1681,21 @@ CRITICAL RULES:
 class StructuredClaude(StructuredConverse):
     def __post_init__(self):
         super()._TO_DICT_EXCLUSIONS.extend(['output_model', 'force_choice', 'skip_add_tool', 'first_tool_only', 'backup_model'])
-        self.output_config = ConverseOutputConfig.from_pydantic(self.output_model)
+        self.output_config = ConverseOutputConfig.from_pydantic(self.schema_model)
+
+    @cached_property
+    def schema_model(self):
+        return self.output_model if self.first_tool_only else create_model(f'{self.output_model.__name__}List', items=(list[self.output_model], ...))
 
     def format_response(self, response):
-        return self.output_model.model_validate_json(''.join(content.text for content in response.output.message.content if content.text))
+        result = self.schema_model.model_validate_json(''.join(content.text for content in response.output.message.content if content.text))
+        return result if self.first_tool_only else result.items
 
 
 CUSTOM_STRUCTURED_MODELS = {
     'llama4-maverick': StructuredMaverick,
-    'claude': StructuredClaude,
+    'sonnet-5-5': StructuredClaude,
+    'opus-5-5': StructuredClaude,
 }
 
 
@@ -1810,9 +1833,6 @@ class ConverseAgent(Converse):
             spec.description += hint
 
     def with_structured_output(self, base_model, **kwargs):
-        from typing import get_origin, get_args
-        from pydantic import Field, create_model
-
         self._list_wrapped = False
         origin = get_origin(base_model)
 
