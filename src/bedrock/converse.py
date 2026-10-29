@@ -6,10 +6,12 @@ import io
 import json
 import logging
 import re
+import threading
 import time
 import typing
 import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from contextlib import closing
 from dataclasses import dataclass, fields
 from dataclasses import field
 from datetime import datetime
@@ -916,6 +918,11 @@ class EmptyResponseError(RuntimeError):
         super().__init__(f"The model returned an empty reply (stop_reason={stop_reason})")
 
 
+class ConverseCancelled(RuntimeError):
+    def __init__(self, model_id):
+        super().__init__(f"The request to {model_id} was cancelled by its caller")
+
+
 class BedrockStreamError(RuntimeError):
     def __init__(self, event_type, event):
         self.event_type = event_type
@@ -1083,8 +1090,10 @@ class Converse(ToDictMixin, FromDictMixin):
     rate_limit_retries: int = 5
     cassette_scope: str = ''
     payload_transforms: List[Callable] = field(default_factory=list)
+    # Set from any thread to stop a streaming request: the stream closes its connection at the next chunk.
+    cancelled: threading.Event = field(default_factory=threading.Event)
     _TO_DICT_EXCLUSIONS = ['region_name', '_client', 'callbacks', 'aws_access_key_id', 'aws_secret_access_key',
-                           '_async_client', 'tool_registry', 'cache_key', 'cassette_scope', 'rate_limit_retries', 'payload_transforms']
+                           '_async_client', 'tool_registry', 'cache_key', 'cassette_scope', 'rate_limit_retries', 'payload_transforms', 'cancelled']
     CACHE_SUPPORTED_MODELS = ['claude', 'nova']
 
     def add_message(self):
@@ -1157,6 +1166,10 @@ class Converse(ToDictMixin, FromDictMixin):
 
     def retryable(self, error):
         return isinstance(error, EmptyResponseError) or isinstance(error, ClientError) and error.response['Error']['Code'] in self.RETRYABLE_ERROR_CODES
+
+    def raise_if_cancelled(self):
+        if self.cancelled.is_set():
+            raise ConverseCancelled(self.model_id)
 
     def rate_limit_delay(self, attempt):
         return min(2 ** (attempt + 1), 30)
@@ -1272,9 +1285,11 @@ class Converse(ToDictMixin, FromDictMixin):
         try:
             raw = self.client.converse_stream(**payload)
             builder = StreamResponseBuilder()
-            for raw_event in raw['stream']:
-                for normalized in builder.absorb(raw_event):
-                    yield normalized
+            with closing(raw['stream']) as events:
+                for raw_event in events:
+                    self.raise_if_cancelled()
+                    for normalized in builder.absorb(raw_event):
+                        yield normalized
             response = builder.build().require_content()
         except Exception as error:
             for callback in self.callbacks:
@@ -1434,6 +1449,7 @@ class Converse(ToDictMixin, FromDictMixin):
             callbacks=self.callbacks,
             tool_registry=self.tool_registry,
             payload_transforms=self.payload_transforms,
+            cancelled=self.cancelled,
             _client=self._client,
             _async_client=self._async_client,
             aws_access_key_id=self.aws_access_key_id,

@@ -361,7 +361,13 @@ class _MantleTransport:
     def _stream_events(self, stream):
         self._start_stream()
         yield {"type": "message_start", "role": "assistant"}
+        with stream:
+            yield from self._chat_chunk_events(stream)
+        yield from self._stream_end_events()
+
+    def _chat_chunk_events(self, stream):
         for chunk in stream:
+            self.raise_if_cancelled()
             if chunk.usage:
                 self._stream_usage = chunk.usage
             if not chunk.choices:
@@ -373,12 +379,17 @@ class _MantleTransport:
             yield from self._stream_reasoning_delta(delta)
             yield from self._stream_text_delta(delta)
             yield from self._stream_tool_deltas(delta)
-        yield from self._stream_end_events()
 
     def _responses_stream_events(self, stream):
         self._start_stream()
         yield {"type": "message_start", "role": "assistant"}
+        with stream:
+            yield from self._responses_events(stream)
+        yield from self._stream_end_events()
+
+    def _responses_events(self, stream):
         for event in stream:
+            self.raise_if_cancelled()
             event_type = getattr(event, 'type', '')
             if event_type == 'response.output_text.delta':
                 yield from self._responses_text_delta(event)
@@ -395,7 +406,6 @@ class _MantleTransport:
                 self._responses_completed(event.response)
             elif event_type in ('response.failed', 'response.error'):
                 raise RuntimeError(getattr(event, 'error', event))
-        yield from self._stream_end_events()
 
     def _stream_end_events(self):
         for index in self._stream_block_order:
