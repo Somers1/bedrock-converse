@@ -7,6 +7,7 @@ from .converse import (
     Finish, structured_model_factory, TokenUsage
 )
 from .tools import tool, Tools, exit_tool, ModelSwitch, model_switch
+from .media import MediaBudget
 from .embedding import (
     BedrockEmbedding, OpenAIEmbedding, MantleEmbedding,
     MultimodalInput, EmbeddingResponse, TextChunker, S3VectorsStore,
