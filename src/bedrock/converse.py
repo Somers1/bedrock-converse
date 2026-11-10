@@ -397,6 +397,9 @@ class ToolUse(FromDictMixin, ToDictMixin):
     name: str
     input: Any  # Can be any JSON structure
 
+    def __post_init__(self):
+        self.name = re.sub(r'[^a-zA-Z0-9_-]', '_', self.name)
+
 
 @dataclass
 class ToolResultContent(ToDictMixin, FromDictMixin):
