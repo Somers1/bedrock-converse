@@ -15,7 +15,7 @@ from contextlib import closing
 from dataclasses import dataclass, fields
 from dataclasses import field
 from datetime import datetime
-from functools import cached_property
+from functools import cache, cached_property
 from typing import Any, List, Dict, Optional, Union, get_origin, get_args, get_type_hints, Callable
 from typing import Literal, ByteString
 from zoneinfo import ZoneInfo
@@ -249,10 +249,15 @@ class FromDictMixin:
     _FROM_DICT_SERIALIZATION_EXCLUSIONS = []
 
     @classmethod
+    @cache
+    def _type_hints(cls):
+        return get_type_hints(cls)
+
+    @classmethod
     def from_dict(cls, data: Dict[str, Any]):
         if data is None:
             return None
-        type_hints = get_type_hints(cls)
+        type_hints = cls._type_hints()
         kwargs = {}
         data = {_from_camel_case(k): v for k, v in data.items()}
         for field_info in fields(cls):

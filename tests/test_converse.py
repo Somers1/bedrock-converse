@@ -230,6 +230,14 @@ class TestSerialization(unittest.TestCase):
         self.assertIn("budget_tokens", d)
         self.assertNotIn("budgetTokens", d)
 
+    def test_from_dict_resolves_type_hints_once_per_class(self):
+        Message._type_hints.cache_clear()
+        with patch("bedrock.converse.get_type_hints", wraps=__import__("typing").get_type_hints) as resolved:
+            messages = [Message.from_dict({"role": "user", "content": [{"text": f"turn {index}"}]}) for index in range(50)]
+        self.assertEqual([message.content[0].text for message in messages][:2], ["turn 0", "turn 1"])
+        self.assertLessEqual(resolved.call_count, 2)
+        self.assertIsNot(Message._type_hints(), MessageContent._type_hints())
+
     def test_tool_use_from_dict(self):
         d = {"toolUseId": "abc", "name": "my_tool", "input": {"x": 1}}
         tu = ToolUse.from_dict(d)
