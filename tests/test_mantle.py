@@ -432,3 +432,42 @@ class TestMantleParseCompletion(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class OpenStream:
+    def __init__(self, chunks):
+        self.chunks = iter(chunks)
+        self.closed = False
+
+    def __iter__(self):
+        return self.chunks
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        self.closed = True
+
+
+class TestMantleStreamClosedEarly(unittest.TestCase):
+    def setUp(self):
+        self.mantle = Mantle(model_id="glm-5.3-flash", api_key="k", base_url="http://herman/v1")
+        self.callback = MagicMock(spec=BaseCallbackHandler)
+        self.mantle.callbacks = [self.callback]
+        usage = MagicMock(prompt_tokens=1200, completion_tokens=7, total_tokens=1207, prompt_tokens_details=None, input_tokens_details=None)
+        self.stream = OpenStream([_mock_stream_chunk(content="Two settlements", usage=usage), _mock_stream_chunk(content=" today."), _mock_stream_chunk(finish_reason="stop", usage=usage)])
+        self.mantle.__dict__['openai_client'] = MagicMock()
+        self.mantle.__dict__['openai_client'].chat.completions.create.return_value = self.stream
+
+    def test_a_stream_closed_early_closes_the_connection_and_reports_the_usage_seen(self):
+        events = self.mantle.stream([Message().add_text("What is on?")])
+        self.assertEqual(next(event for event in events if event["type"] == "text_delta")["text"], "Two settlements")
+        events.close()
+        self.assertTrue(self.stream.closed)
+        self.callback.on_converse_error.assert_not_called()
+        response = self.callback.on_converse_end.call_args.args[0]
+        self.assertEqual((response.content, response.usage.input_tokens, response.usage.output_tokens), ("Two settlements", 1200, 7))
+
+    def test_a_stream_read_to_the_end_ends_once(self):
+        list(self.mantle.stream([Message().add_text("What is on?")]))
+        self.assertEqual(self.callback.on_converse_end.call_count, 1)

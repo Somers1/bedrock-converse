@@ -569,18 +569,16 @@ class _MantleTransport:
             else:
                 yield from self._stream_events(stream)
             response = self._stream_response(start).require_content()
+        except GeneratorExit:
+            self.end_stream(self._stream_response(start))
+            raise
         except Exception as error:
             for callback in self.callbacks:
                 try:
                     if hasattr(callback, 'on_converse_error'): callback.on_converse_error(self, error)
                 except Exception as callback_error: logger.warning(f"Callback error: {callback_error}")
             raise
-        response.model_id = self.model_id
-        for callback in self.callbacks:
-            try:
-                if hasattr(callback, 'on_converse_end'): callback.on_converse_end(response)
-            except Exception as e: logger.warning(f"Callback error: {e}")
-        return response
+        return self.end_stream(response)
 
     def with_extra_params(self, params):
         self.extra_params = {**(self.extra_params or {}), **params}

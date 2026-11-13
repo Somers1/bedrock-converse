@@ -1038,6 +1038,11 @@ class StreamResponseBuilder:
                 self.performance_config = ConversePerformanceConfig.from_dict(meta["performanceConfig"])
             yield {"type": "metadata", "usage": self.usage, "metrics": self.metrics}
 
+    def partial(self):
+        text = "".join(self.blocks[idx]["text"] for idx in self.block_order if self.blocks[idx]["type"] == "text")
+        message = Message(role=self.role, content=[MessageContent(text=text)] if text else [])
+        return ConverseResponse(output=ConverseOutput(message=message), stop_reason=self.stop_reason, usage=self.usage or TokenUsage(), metrics=self.metrics)
+
     def build(self):
         contents = []
         truncated = False
@@ -1299,12 +1304,18 @@ class Converse(ToDictMixin, FromDictMixin):
                     for normalized in builder.absorb(raw_event):
                         yield normalized
             response = builder.build().require_content()
+        except GeneratorExit:
+            self.end_stream(builder.partial())
+            raise
         except Exception as error:
             for callback in self.callbacks:
                 try:
                     if hasattr(callback, 'on_converse_error'): callback.on_converse_error(self, error)
                 except Exception as cb_e: logger.warning(f"Callback error: {cb_e}")
             raise
+        return self.end_stream(response)
+
+    def end_stream(self, response):
         response.model_id = self.model_id
         for callback in self.callbacks:
             try:

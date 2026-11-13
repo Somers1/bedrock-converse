@@ -1202,3 +1202,25 @@ class TestResolveMessageRefs(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class TestStreamClosedEarly(unittest.TestCase):
+    def setUp(self):
+        self.agent = ConverseAgent(model_id="anthropic.claude-3-5-sonnet-20241022-v2:0")
+        self.agent._client = MagicMock()
+        self.callback = MagicMock()
+        self.agent.callbacks = [self.callback]
+        self.agent._client.converse_stream.return_value = {"stream": (event for event in _make_stream_dict(text="Two settlements today.")["stream"])}
+
+    def test_a_stream_closed_early_still_ends_with_what_arrived(self):
+        stream = self.agent.stream([Message().add_text("What is on?")])
+        self.assertEqual(next(event for event in stream if event["type"] == "text_delta")["text"], "Two settlements today.")
+        stream.close()
+        self.callback.on_converse_error.assert_not_called()
+        response = self.callback.on_converse_end.call_args.args[0]
+        self.assertEqual((response.content, response.usage, response.model_id), ("Two settlements today.", TokenUsage(), self.agent.model_id))
+
+    def test_a_stream_read_to_the_end_ends_once(self):
+        list(self.agent.stream([Message().add_text("What is on?")]))
+        self.assertEqual(self.callback.on_converse_end.call_count, 1)
+        self.assertEqual(self.callback.on_converse_end.call_args.args[0].usage.input_tokens, 10)
