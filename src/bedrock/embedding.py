@@ -68,9 +68,9 @@ class _OpenAIEmbeddingTransport:
     read_timeout: float = 180.0
     max_retries: int = 2
 
-    def _get_client(self, client_class):
+    def _get_client(self, client_class, **kwargs):
         from openai import Timeout
-        kwargs = {"timeout": Timeout(self.read_timeout, connect=5.0), "max_retries": self.max_retries}
+        kwargs = {"timeout": Timeout(self.read_timeout, connect=5.0), "max_retries": self.max_retries, **kwargs}
         api_key = self.api_key or os.environ.get("OPENAI_API_KEY")
         if api_key:
             kwargs["api_key"] = api_key
@@ -85,7 +85,8 @@ class _OpenAIEmbeddingTransport:
     @cached_property
     def openai_client(self):
         openai_class, _ = _get_openai_clients()
-        return self._get_client(openai_class)
+        from .connections import connection_pool
+        return self._get_client(openai_class, http_client=connection_pool(self.base_url))
 
     @cached_property
     def async_openai_client(self):

@@ -10,6 +10,7 @@ from typing import Optional
 
 from openai import OpenAI, AsyncOpenAI, Timeout
 
+from .connections import connection_pool
 from .converse import (Converse, ConverseAgent, StructuredConverse, ConverseResponse, ConverseOutput,
                        Message, MessageContent, ToolUse, TokenUsage, ConverseMetrics,
                        ReasoningContent, ReasoningText, AdditionalModelRequestFields, ThinkingConfig)
@@ -81,18 +82,20 @@ class _MantleTransport:
         region = self.region_name or self.session.region_name
         return f'https://bedrock-mantle.{region}.api.aws/v1'
 
-    def _get_client(self, openai_class):
+    @property
+    def _client_options(self):
+        options = {'base_url': self._mantle_base_url, 'timeout': self.client_timeout, 'max_retries': self.max_retries}
         if api_key := self.api_key or os.environ.get('MANTLE_API_KEY'):
-            return openai_class(api_key=api_key, base_url=self._mantle_base_url, timeout=self.client_timeout, max_retries=self.max_retries)
-        return openai_class(base_url=self._mantle_base_url, timeout=self.client_timeout, max_retries=self.max_retries)
+            options['api_key'] = api_key
+        return options
 
     @cached_property
     def openai_client(self) -> OpenAI:
-        return self._get_client(OpenAI)
+        return OpenAI(**self._client_options, http_client=connection_pool(self._mantle_base_url))
 
     @cached_property
     def async_openai_client(self) -> AsyncOpenAI:
-        return self._get_client(AsyncOpenAI)
+        return AsyncOpenAI(**self._client_options)
 
     def _build_tool_params(self, params):
         if not self.tool_config:
