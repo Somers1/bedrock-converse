@@ -1,9 +1,10 @@
 from contextlib import suppress
 from functools import lru_cache
+from importlib import import_module
 
-import httpx
 from openai import DefaultHttpxClient
 
+httpx = import_module(DefaultHttpxClient.__base__.__module__.partition(".")[0])
 KEEPALIVE = httpx.Limits(max_connections=1000, max_keepalive_connections=100, keepalive_expiry=300)
 DONE = b"[DONE]"
 TAIL = 64
