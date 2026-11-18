@@ -10,6 +10,7 @@ from typing import Optional
 
 from openai import OpenAI, AsyncOpenAI, Timeout
 
+from .arrivals import Arrivals, joined
 from .connections import connection_pool
 from .converse import (Converse, ConverseAgent, StructuredConverse, ConverseResponse, ConverseOutput,
                        Message, MessageContent, ToolUse, TokenUsage, ConverseMetrics,
@@ -364,51 +365,55 @@ class _MantleTransport:
     def _stream_events(self, stream):
         self._start_stream()
         yield {"type": "message_start", "role": "assistant"}
-        with stream:
-            yield from self._chat_chunk_events(stream)
+        yield from self._chat_chunk_events(stream)
         yield from self._stream_end_events()
 
     def _chat_chunk_events(self, stream):
-        for chunk in stream:
+        for chunks in Arrivals(stream):
             self.raise_if_cancelled()
-            if chunk.usage:
-                self._stream_usage = chunk.usage
-            if not chunk.choices:
-                continue
-            choice = chunk.choices[0]
-            delta = choice.delta
-            if choice.finish_reason:
-                self._stream_finish_reason = choice.finish_reason
-            yield from self._stream_reasoning_delta(delta)
-            yield from self._stream_text_delta(delta)
-            yield from self._stream_tool_deltas(delta)
+            yield from joined(event for chunk in chunks for event in self._chat_chunk(chunk))
+
+    def _chat_chunk(self, chunk):
+        if chunk.usage:
+            self._stream_usage = chunk.usage
+        if not chunk.choices:
+            return
+        choice = chunk.choices[0]
+        delta = choice.delta
+        if choice.finish_reason:
+            self._stream_finish_reason = choice.finish_reason
+        yield from self._stream_reasoning_delta(delta)
+        yield from self._stream_text_delta(delta)
+        yield from self._stream_tool_deltas(delta)
 
     def _responses_stream_events(self, stream):
         self._start_stream()
         yield {"type": "message_start", "role": "assistant"}
-        with stream:
-            yield from self._responses_events(stream)
+        yield from self._responses_events(stream)
         yield from self._stream_end_events()
 
     def _responses_events(self, stream):
-        for event in stream:
+        for events in Arrivals(stream):
             self.raise_if_cancelled()
-            event_type = getattr(event, 'type', '')
-            if event_type == 'response.output_text.delta':
-                yield from self._responses_text_delta(event)
-            elif event_type in ('response.reasoning_text.delta', 'response.reasoning_summary_text.delta'):
-                yield from self._responses_reasoning_delta(event)
-            elif event_type == 'response.output_item.added':
-                yield from self._responses_output_item(event.item, event.output_index)
-            elif event_type == 'response.output_item.done':
-                yield from self._responses_output_item(event.item, event.output_index)
-                self._capture_responses_reasoning(event.item, event.output_index)
-            elif event_type == 'response.function_call_arguments.delta':
-                yield from self._responses_function_call_arguments_delta(event)
-            elif event_type == 'response.completed':
-                self._responses_completed(event.response)
-            elif event_type in ('response.failed', 'response.error'):
-                raise RuntimeError(getattr(event, 'error', event))
+            yield from joined(normalized for event in events for normalized in self._responses_event(event))
+
+    def _responses_event(self, event):
+        event_type = getattr(event, 'type', '')
+        if event_type == 'response.output_text.delta':
+            yield from self._responses_text_delta(event)
+        elif event_type in ('response.reasoning_text.delta', 'response.reasoning_summary_text.delta'):
+            yield from self._responses_reasoning_delta(event)
+        elif event_type == 'response.output_item.added':
+            yield from self._responses_output_item(event.item, event.output_index)
+        elif event_type == 'response.output_item.done':
+            yield from self._responses_output_item(event.item, event.output_index)
+            self._capture_responses_reasoning(event.item, event.output_index)
+        elif event_type == 'response.function_call_arguments.delta':
+            yield from self._responses_function_call_arguments_delta(event)
+        elif event_type == 'response.completed':
+            self._responses_completed(event.response)
+        elif event_type in ('response.failed', 'response.error'):
+            raise RuntimeError(getattr(event, 'error', event))
 
     def _stream_end_events(self):
         for index in self._stream_block_order:
