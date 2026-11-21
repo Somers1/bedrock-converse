@@ -351,7 +351,7 @@ class Image(ToDictMixin, FromDictMixin):
     source: FileSource
 
     def __post_init__(self):
-        valid_formats = typing.get_args(self.__annotations__['format'])
+        valid_formats = typing.get_args(self._type_hints()['format'])
         if self.format == 'jpg':
             self.format = 'jpeg'
         if self.format not in valid_formats:
@@ -369,7 +369,7 @@ class Document(ToDictMixin, FromDictMixin):
     source: FileSource
 
     def __post_init__(self):
-        valid_formats = typing.get_args(self.__annotations__['format'])
+        valid_formats = typing.get_args(self._type_hints()['format'])
         if self.format not in valid_formats:
             raise InvalidFormat(f"Invalid format: {self.format}. Must be one of: {', '.join(valid_formats)}")
         self.clean_name()
