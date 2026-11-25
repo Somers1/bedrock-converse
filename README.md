@@ -323,8 +323,8 @@ class ChatTools(Tools):
 # loop with it; return None to let the loop continue.
 agent.on_text(lambda text: text if "done" in text else None)
 
-# Called with (tool_name, content) for each successful tool result before it's sent to
-# the model. Return replacement content to substitute (e.g. offload an oversize result
+# Called with (tool_name, content) for each tool result, successful or failed, before it's
+# sent to the model. Return replacement content to substitute (e.g. offload an oversize result
 # to a file and swap in a short pointer), or None to keep the original. Runs in-loop, so
 # the substituted content is what gets cached and persisted.
 agent.on_tool_result(lambda name, content: offload(content) if too_big(content) else None)

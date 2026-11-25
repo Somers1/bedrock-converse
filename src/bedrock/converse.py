@@ -1830,7 +1830,7 @@ class ConverseAgent(Converse):
         return self
 
     def on_tool_result(self, hook: callable):
-        """Register a hook called with (tool_name, content) for each successful tool result before it is
+        """Register a hook called with (tool_name, content) for each tool result, successful or failed, before it is
         sent to the model, where content is the List[ToolResultContent]. Return replacement content to
         substitute (e.g. an oversize result offloaded to a file), or None to keep the original."""
         self.tool_result_hook = hook
@@ -2170,16 +2170,15 @@ class ConverseAgent(Converse):
         return self.run_one_tool(tool_use, tool_input)
 
     def build_tool_result(self, tool_use, result, exc):
-        if exc is None:
-            content = self.as_tool_content(result)
-            if self.tool_result_hook:
-                content = self.tool_result_hook(tool_use.name, content) or content
-            summary = '\n'.join(item.text if item.text is not None else self.content_label(item) for item in content)
-            tool_result = ToolResult(tool_use_id=tool_use.tool_use_id, content=content, status="success")
-            return tool_result, {"type": "tool_result", "tool_use_id": tool_use.tool_use_id, "name": tool_use.name, "result": summary, "status": "success"}
-        self.log_tool_failure(tool_use, exc)
-        tool_result = ToolResult(tool_use_id=tool_use.tool_use_id, content=[ToolResultContent(text=str(exc))], status="error")
-        return tool_result, {"type": "tool_result", "tool_use_id": tool_use.tool_use_id, "name": tool_use.name, "result": str(exc), "status": "error"}
+        if exc is not None:
+            self.log_tool_failure(tool_use, exc)
+        status = "success" if exc is None else "error"
+        content = self.as_tool_content(result) if exc is None else [ToolResultContent(text=str(exc))]
+        if self.tool_result_hook:
+            content = self.tool_result_hook(tool_use.name, content) or content
+        summary = '\n'.join(item.text if item.text is not None else self.content_label(item) for item in content)
+        tool_result = ToolResult(tool_use_id=tool_use.tool_use_id, content=content, status=status)
+        return tool_result, {"type": "tool_result", "tool_use_id": tool_use.tool_use_id, "name": tool_use.name, "result": summary, "status": status}
 
     def log_tool_failure(self, tool_use, exc):
         if isinstance(exc, (ToolArgumentError, *self.expected_tool_errors)):
