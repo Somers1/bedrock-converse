@@ -3,7 +3,6 @@ import unittest
 import httpx
 
 from bedrock.connections import KEEPALIVE, Finished, connection_pool
-from bedrock.converse import Converse
 from bedrock.embedding import OpenAIEmbedding
 from bedrock.mantle import Mantle, MantleAgent
 
@@ -78,15 +77,3 @@ class TestStreamedResponsesReturnTheirConnection(unittest.TestCase):
         for hook in connection_pool("http://herman.test/v1").event_hooks["response"]:
             hook(response)
         self.assertIsInstance(response.stream, Finished)
-
-
-class TestSharedBedrockClient(unittest.TestCase):
-    def converse(self, region="ap-southeast-2", key="a"):
-        return Converse(model_id="m", region_name=region, aws_access_key_id=key, aws_secret_access_key="s")
-
-    def test_requests_with_the_same_region_and_credentials_share_a_client(self):
-        self.assertIs(self.converse().client, self.converse().client)
-
-    def test_another_region_or_account_gets_its_own_client(self):
-        self.assertIsNot(self.converse().client, self.converse(region="us-east-1").client)
-        self.assertIsNot(self.converse().client, self.converse(key="b").client)

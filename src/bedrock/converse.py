@@ -6,7 +6,6 @@ import io
 import json
 import logging
 import re
-import socket
 import threading
 import time
 import typing
@@ -16,7 +15,7 @@ from contextlib import closing
 from dataclasses import dataclass, fields
 from dataclasses import field
 from datetime import datetime
-from functools import cache, cached_property, lru_cache
+from functools import cache, cached_property
 from typing import Any, List, Dict, Optional, Union, get_origin, get_args, get_type_hints, Callable
 from typing import Literal, ByteString
 from zoneinfo import ZoneInfo
@@ -46,17 +45,6 @@ logger = logging.getLogger(__name__)
 
 # AWS Bedrock maximum image dimension
 MAX_IMAGE_DIMENSION = 8000
-BEDROCK = Config(read_timeout=180, max_pool_connections=100, tcp_keepalive=True)
-KEEPALIVE = {'TCP_KEEPIDLE': 30, 'TCP_KEEPINTVL': 10, 'TCP_KEEPCNT': 3, 'TCP_USER_TIMEOUT': 30000}
-KEEPALIVE_OPTIONS = [(socket.IPPROTO_TCP, getattr(socket, name), value) for name, value in KEEPALIVE.items() if hasattr(socket, name)]
-
-
-@lru_cache(maxsize=None)
-def bedrock_runtime(region_name, aws_access_key_id=None, aws_secret_access_key=None):
-    session = boto3.Session(region_name=region_name, aws_access_key_id=aws_access_key_id, aws_secret_access_key=aws_secret_access_key)
-    client = session.client('bedrock-runtime', config=BEDROCK)
-    client._endpoint.http_session._socket_options.extend(KEEPALIVE_OPTIONS)
-    return client
 
 
 def resize_image_if_needed(image_bytes: bytes, image_format: str) -> bytes:
@@ -1143,7 +1131,7 @@ class Converse(ToDictMixin, FromDictMixin):
 
     @property
     def bedrock_client(self):
-        return bedrock_runtime(self.region_name, self.aws_access_key_id, self.aws_secret_access_key)
+        return self.session.client('bedrock-runtime', config=Config(read_timeout=180))
 
     @property
     def cassette_key(self):
